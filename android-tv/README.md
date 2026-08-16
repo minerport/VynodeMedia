@@ -66,7 +66,7 @@ Enable **Developer options > Network debugging** on Shield, note its IP, and run
 
 ```sh
 adb connect SHIELD_IP:5555
-adb install Vynode-Media-android-tv-0.5.0-beta.2.apk
+adb install Vynode-Media-android-tv-0.5.0-beta.3.apk
 ```
 
 Approve the debugging prompt on the television. Disable network debugging afterward when it is no longer needed.
