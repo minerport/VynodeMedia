@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -177,6 +177,7 @@ function App() {
       preferences: {},
       metadata: {},
       artwork: {},
+      watchlist: [],
     });
   const loadLibrary = async () => {
     const remoteServers = connections().map((server, index) => ({
@@ -270,6 +271,11 @@ function App() {
             }),
           },
         );
+        const metadataStatus = await nativeFetch("/api/metadata/status").then((response) => response.json()).catch(() => ({}));
+        if (!metadataStatus.configured && cloud.token && cloud.localServer.secret) {
+          const access = await nativeFetch(`https://media.vynodehub.com/v1/servers/${cloud.localServer.id}/access`, { method: "POST", headers: { Authorization: `Bearer ${cloud.token}` } }).then((response) => response.json());
+          if (access.ticket) await nativeFetch("/api/cloud/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ serverId: cloud.localServer.id, serverSecret: cloud.localServer.secret, ticket: access.ticket }) });
+        }
       } catch {}
     };
     heartbeat();
@@ -294,6 +300,9 @@ function App() {
       ...customization,
       preferences: { ...preferences, ...patch },
     });
+  const toggleAppFullscreen = () => window.vynodeDesktop?.toggleFullscreen
+    ? window.vynodeDesktop.toggleFullscreen()
+    : document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
   useEffect(() => {
     document.documentElement.dataset.theme = preferences.theme || "midnight";
     document.documentElement.style.setProperty(
@@ -317,12 +326,13 @@ function App() {
     if (!response.ok) return setSetupError("That folder could not be opened.");
     await loadLibrary();
   };
-  const rawLibrary = items.length ? items : demo;
+  // Search and library views must represent indexed media, never decorative demo titles.
+  const rawLibrary = items;
   const allLibrary = rawLibrary.map((item) => ({
     ...item,
     ...(customization.metadata?.[item.id] || {}),
     overlay: customization.overlays?.[item.id],
-    artwork: customization.artwork?.[item.id],
+    artwork: customization.artwork?.[item.id] || item.poster || "",
   }));
   const enabledLibraries = preferences.enabledLibraries;
   const library = Array.isArray(enabledLibraries)
@@ -349,25 +359,32 @@ function App() {
     [scopedLibrary, query],
   );
   const hero = scopedLibrary[0] || library[0];
-  const playItem = (item) => {
-    const playable =
-      item.kind === "Series" ? item.seasons?.[0]?.episodes?.[0] : item;
-    if (playable) setPlaying(playable);
+  const playItem = async (item) => {
+    const episodes = item.kind === "Series" ? (item.seasons || []).flatMap((season) => season.episodes || []) : [];
+    const playable = item.kind === "Series"
+      ? episodes.find((episode) => episode.progress > 0 && episode.progress < 0.95) || episodes[0]
+      : item;
+    if (!playable) return;
+    let ready = playable;
+    if (!playable.duration && !playable.id.startsWith("demo")) {
+      const server = playable.serverUrl ? { url: playable.serverUrl, token: playable.serverToken } : null;
+      const probe = await serverFetch(server, `/api/probe/${playable.mediaId || playable.id}`).then((r) => r.ok ? r.json() : null).catch(() => null);
+      const duration = Number(probe?.format?.duration) || 0;
+      if (duration) ready = { ...playable, duration };
+    }
+    setPlaying(ready);
   };
-  const save = (e) => {
-    if (!playing || playing.id.startsWith("demo") || !e.currentTarget.duration)
-      return;
+  const saveProgress = (item, position, duration) => {
+    if (!item || item.id.startsWith("demo") || !duration) return;
     serverFetch(
-      playing.serverUrl
-        ? { url: playing.serverUrl, token: playing.serverToken }
+      item.serverUrl
+        ? { url: item.serverUrl, token: item.serverToken }
         : null,
-      `/api/progress/${playing.mediaId || playing.id}`,
+      `/api/progress/${item.mediaId || item.id}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          progress: e.currentTarget.currentTime / e.currentTarget.duration,
-        }),
+        body: JSON.stringify({ progress: position / duration }),
       },
     );
   };
@@ -454,6 +471,7 @@ function App() {
             />
           </div>
           <button className="cast">◉</button>
+          <button className="fullscreenButton" title="Fullscreen (F11)" aria-label="Toggle application fullscreen" onClick={toggleAppFullscreen}>⛶</button>
           <button className="avatar">M</button>
           <div className="viewSwitch">
             {[
@@ -523,52 +541,93 @@ function App() {
             onOpen={setActive}
             view={view}
           />
+        ) : nav === "Movies" || nav === "TV Shows" ? (
+          <div className="workspace">
+            <div className="workspaceHead">
+              <div>
+                <span className="eyebrow">COMBINED LIBRARY</span>
+                <h1>{nav}</h1>
+                <p>{scopedLibrary.length} titles across your enabled servers and libraries.</p>
+              </div>
+            </div>
+            <Section title={nav} items={scopedLibrary} onPlay={playItem} onOpen={setActive} view={view} />
+          </div>
+        ) : nav === "Continue Watching" ? (
+          <div className="workspace">
+            <div className="workspaceHead"><div><span className="eyebrow">PICK UP WHERE YOU LEFT OFF</span><h1>Continue Watching</h1><p>Only started and unfinished titles appear here.</p></div></div>
+            <Section title="Movies" items={library.filter((x) => x.kind === "Movie" && x.progress > 0 && x.progress < 0.95)} onPlay={playItem} onOpen={setActive} view={view} />
+            <Section title="TV Shows" items={library.filter((x) => x.kind === "Series" && x.progress > 0 && x.progress < 0.95)} onPlay={playItem} onOpen={setActive} view={view} />
+            {!library.some((x) => x.progress > 0 && x.progress < 0.95) && <div className="blankState"><strong>Nothing unfinished.</strong><span>Titles appear after you begin watching and disappear when completed.</span></div>}
+          </div>
+        ) : nav === "Watchlist" ? (
+          <div className="workspace">
+            <div className="workspaceHead"><div><span className="eyebrow">SAVED FOR LATER</span><h1>Watchlist</h1><p>Only titles you explicitly add appear here.</p></div></div>
+            <Section title="Movies" items={library.filter((x) => x.kind === "Movie" && (customization.watchlist || []).includes(x.id))} onPlay={playItem} onOpen={setActive} view={view} />
+            <Section title="TV Shows" items={library.filter((x) => x.kind === "Series" && (customization.watchlist || []).includes(x.id))} onPlay={playItem} onOpen={setActive} view={view} />
+            {!library.some((x) => (customization.watchlist || []).includes(x.id)) && <div className="blankState"><strong>Your watchlist is empty.</strong><span>Open any title and choose Add to Watchlist.</span></div>}
+          </div>
         ) : nav === "Vynode Account" ? (
           <VynodeAccount />
         ) : (
           <>
-            <section className="hero" style={{ "--h": hero.hue }}>
-              <div className="heroWash" />
-              <div className="heroCopy">
-                <span className="eyebrow">FEATURED FROM YOUR LIBRARY</span>
-                <h1>{hero.title}</h1>
-                <p className="meta">
-                  {hero.year || "Recently added"} &nbsp; • &nbsp; {hero.kind}{" "}
-                  &nbsp; • &nbsp; <span>4K</span>
-                </p>
-                <p>
-                  Your media, beautifully organized and ready on every screen.
-                  Private by default, entirely under your control.
-                </p>
-                <div>
-                  <button className="primary" onClick={() => playItem(hero)}>
-                    ▶ Play
-                  </button>
-                  <button className="secondary" onClick={() => setActive(hero)}>
-                    ⓘ More info
-                  </button>
+            {hero ? (
+              <section className="hero" style={{ "--h": hero.hue || 218 }}>
+                <div className="heroWash" />
+                <div className="heroCopy">
+                  <span className="eyebrow">FEATURED FROM YOUR LIBRARY</span>
+                  <h1>{hero.title}</h1>
+                  <p className="meta">
+                    {hero.year || "Recently added"} &nbsp; • &nbsp; {hero.kind}{" "}
+                    &nbsp; • &nbsp; <span>4K</span>
+                  </p>
+                  <p>
+                    Your media, beautifully organized and ready on every screen.
+                    Private by default, entirely under your control.
+                  </p>
+                  <div>
+                    <button className="primary" onClick={() => playItem(hero)}>
+                      ▶ Play
+                    </button>
+                    <button className="secondary" onClick={() => setActive(hero)}>
+                      ⓘ More info
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </section>
-            <Section
-              title="Continue Watching"
-              items={scopedLibrary.filter((x) => x.progress > 0)}
-              onPlay={playItem}
-              onOpen={setActive}
-              view={view}
-            />
-            <Section
-              title="Recently Added"
-              items={scopedLibrary}
-              onPlay={playItem}
-              onOpen={setActive}
-              view={view}
-            />
-            {!items.length && (
-              <div className="empty">
-                Demo library shown · Choose a media folder in the app to begin.
-              </div>
+              </section>
+            ) : (
+              <section className="empty">
+                <h2>{setup ? "Add your first library" : "Checking your media files"}</h2>
+                <p>{setup ? "Open Library Sources to choose the folders Vynode should watch." : "Only confirmed video files are added. Your library will update automatically as validation completes."}</p>
+              </section>
             )}
+            <Section
+              title="Continue Watching Movies"
+              items={library.filter((x) => x.kind === "Movie" && x.progress > 0 && x.progress < 0.95)}
+              onPlay={playItem}
+              onOpen={setActive}
+              view={view}
+            />
+            <Section
+              title="Continue Watching TV"
+              items={library.filter((x) => x.kind === "Series" && x.progress > 0 && x.progress < 0.95)}
+              onPlay={playItem}
+              onOpen={setActive}
+              view={view}
+            />
+            <Section
+              title="Movies"
+              items={library.filter((x) => x.kind === "Movie")}
+              onPlay={playItem}
+              onOpen={setActive}
+              view={view}
+            />
+            <Section
+              title="TV Shows"
+              items={library.filter((x) => x.kind === "Series")}
+              onPlay={playItem}
+              onOpen={setActive}
+              view={view}
+            />
           </>
         )}
       </main>
@@ -586,35 +645,15 @@ function App() {
       )}
       {playing && (
         <div className="player">
-          <button onClick={() => setPlaying(null)}>← Back</button>
           {playing.id.startsWith("demo") ? (
             <div className="demoPlayer">
+              <button onClick={() => setPlaying(null)}>← Back</button>
               <span>▶</span>
               <h2>{playing.title}</h2>
               <p>Add your own media to start playback.</p>
             </div>
           ) : (
-            <video
-              autoPlay
-              controls
-              src={mediaUrl(
-                /\.(mkv|avi)$/i.test(playing.filename || "")
-                  ? `/transcode/${playing.mediaId || playing.id}`
-                  : `/stream/${playing.mediaId || playing.id}`,
-              )}
-              onTimeUpdate={save}
-            >
-              {(playing.subtitles || []).map((subtitle) => (
-                <track
-                  key={subtitle.index}
-                  kind="subtitles"
-                  label={subtitle.label}
-                  src={mediaUrl(
-                    `/api/subtitles/${playing.mediaId || playing.id}/${subtitle.index}`,
-                  )}
-                />
-              ))}
-            </video>
+            <MediaPlayer item={playing} onClose={() => setPlaying(null)} onProgress={saveProgress} />
           )}
         </div>
       )}
@@ -668,7 +707,7 @@ function DetailPage({ item, customization, save, onClose, onPlay }) {
         .catch(() => {});
   }, [probeId]);
   const [trailerUrl, setTrailerUrl] = useState(
-    customization.trailers?.[item.id] || "",
+    customization.trailers?.[item.id] || item.trailer || "",
   );
   const trailerId = youtubeId(trailerUrl);
   const saveTrailer = () =>
@@ -683,6 +722,25 @@ function DetailPage({ item, customization, save, onClose, onPlay }) {
       artwork: { ...(customization.artwork || {}), [item.id]: pendingArtwork },
     });
     setEditing(false);
+  };
+  const watchlisted = (customization.watchlist || []).includes(item.id);
+  const toggleWatchlist = () => save({
+    ...customization,
+    watchlist: watchlisted
+      ? (customization.watchlist || []).filter((id) => id !== item.id)
+      : [...(customization.watchlist || []), item.id],
+  });
+  const metadataServer = item.serverUrl ? { url: item.serverUrl, token: item.serverToken } : null;
+  const refreshMetadata = async () => {
+    await serverFetch(metadataServer, "/api/metadata/refresh", { method: "POST" });
+    window.setTimeout(() => window.location.reload(), 1500);
+  };
+  const fixMatch = async () => {
+    const value = window.prompt("Enter the numeric TMDB ID for this title", item.tmdbId || "");
+    if (!value) return;
+    const response = await serverFetch(metadataServer, `/api/metadata/${item.mediaId || item.id}/match`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tmdbId: Number(value) }) });
+    if (!response.ok) return window.alert((await response.json().catch(() => ({}))).error || "Match failed.");
+    window.setTimeout(() => window.location.reload(), 1500);
   };
   const setArtwork = (file) => {
     if (!file) return;
@@ -700,9 +758,9 @@ function DetailPage({ item, customization, save, onClose, onPlay }) {
       <div
         className="detailBackdrop"
         style={
-          item.artwork
+          item.backdrop || item.artwork
             ? {
-                backgroundImage: `linear-gradient(0deg,#090b10,transparent 70%),url(${item.artwork})`,
+                backgroundImage: `linear-gradient(0deg,#090b10,transparent 70%),url(${item.backdrop || item.artwork})`,
                 backgroundSize: "cover",
                 backgroundPosition: "center",
               }
@@ -715,6 +773,8 @@ function DetailPage({ item, customization, save, onClose, onPlay }) {
         <p>
           {item.year || "From your library"} ·{" "}
           {item.kind === "Series" ? `${seasons.length} seasons` : "Movie"}
+          {item.contentRating ? ` · ${item.contentRating}` : ""}
+          {item.rating ? ` · ★ ${Number(item.rating).toFixed(1)}` : ""}
         </p>
         <div>
           <button className="primary" onClick={() => onPlay(item)}>
@@ -726,6 +786,9 @@ function DetailPage({ item, customization, save, onClose, onPlay }) {
           <button className="secondary" onClick={() => setEditing(true)}>
             ✎ Edit details
           </button>
+          <button className={`secondary ${watchlisted ? "watchlisted" : ""}`} onClick={toggleWatchlist}>{watchlisted ? "★ Remove from Watchlist" : "☆ Add to Watchlist"}</button>
+          <button className="secondary" onClick={fixMatch}>◎ Fix match</button>
+          <button className="secondary" onClick={refreshMetadata}>↻ Refresh metadata</button>
         </div>
       </div>
       <div className="detailContent">
@@ -745,13 +808,13 @@ function DetailPage({ item, customization, save, onClose, onPlay }) {
             <div className="episodeList">
               {episodes.map((episode) => (
                 <article key={episode.id}>
-                  <div className="episodeThumb" style={{ "--h": item.hue }}>
+                  <div className="episodeThumb" style={{ "--h": item.hue, ...(episode.still ? { backgroundImage: `url(${episode.still})`, backgroundSize: "cover", backgroundPosition: "center" } : {}) }}>
                     <button onClick={() => onPlay(episode)}>▶</button>
                   </div>
                   <div>
                     <span>EPISODE {episode.episode}</span>
                     <h3>{episode.title}</h3>
-                    <p>{episode.filename}</p>
+                    <p>{episode.description || episode.filename}</p>
                     {episode.progress > 0 && (
                       <div className="episodeProgress">
                         <i style={{ width: `${episode.progress * 100}%` }} />
@@ -775,6 +838,10 @@ function DetailPage({ item, customization, save, onClose, onPlay }) {
               {item.description ||
                 "Stored privately in your Vynode library. Playback position and artwork preferences remain on this device."}
             </p>
+            {item.genres?.length > 0 && <p>{item.genres.join(" · ")}</p>}
+            {item.studios?.length > 0 && <p><strong>Studio:</strong> {item.studios.join(", ")}</p>}
+            {item.directors?.length > 0 && <p><strong>Directed by:</strong> {item.directors.join(", ")}</p>}
+            {item.cast?.length > 0 && <p><strong>Cast:</strong> {item.cast.slice(0, 10).map((person) => person.name).join(", ")}</p>}
           </div>
         )}
         <div className="trailerSetting">
@@ -1078,7 +1145,9 @@ function LibraryHealth() {
     fetch("/api/library-health")
       .then((r) => r.json())
       .then(setHealth);
-  useEffect(refresh, []);
+  useEffect(() => {
+    refresh();
+  }, []);
   if (!health)
     return (
       <div className="workspace">
@@ -1281,6 +1350,203 @@ function LibraryVisibility({ items, preferences, setPreference }) {
 }
 
 const CLOUD_URL = "https://media.vynodehub.com";
+const savedCloudAccount = () => {
+  try {
+    return JSON.parse(localStorage.getItem("vynodeCloud") || "null");
+  } catch {
+    return null;
+  }
+};
+
+async function ensureLocalServerLinked(account) {
+  if (!account?.token) return account;
+  const status = await nativeFetch("/api/remote/status").then((response) => response.json());
+  let localServer = account.localServer;
+  if (!localServer?.id || !localServer?.secret) {
+    const response = await nativeFetch(`${CLOUD_URL}/v1/servers/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${account.token}` },
+      body: JSON.stringify({ name: status.server.name, capabilities: { movies: true, tv: true, transcoding: true, metadata: true } }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const registered = await response.json();
+    if (!response.ok || !registered.serverId) throw new Error(registered.error || "This media server could not be registered.");
+    localServer = { id: registered.serverId, secret: registered.serverSecret };
+  }
+  await nativeFetch(`${CLOUD_URL}/v1/servers/${localServer.id}/heartbeat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${localServer.secret}` },
+    body: JSON.stringify({ endpoints: status.addresses, capabilities: { movies: true, tv: true, transcoding: true, metadata: true } }),
+    signal: AbortSignal.timeout(10000),
+  });
+  const accessResponse = await nativeFetch(`${CLOUD_URL}/v1/servers/${localServer.id}/access`, { method: "POST", headers: { Authorization: `Bearer ${account.token}` }, signal: AbortSignal.timeout(10000) });
+  const access = await accessResponse.json();
+  if (!accessResponse.ok || !access.ticket) throw new Error(access.error || "Cloud ownership verification failed.");
+  const configResponse = await nativeFetch("/api/cloud/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ serverId: localServer.id, serverSecret: localServer.secret, ticket: access.ticket }) });
+  if (!configResponse.ok) throw new Error((await configResponse.json().catch(() => ({}))).error || "Metadata service configuration failed.");
+  const next = { ...account, localServer };
+  localStorage.setItem("vynodeCloud", JSON.stringify(next));
+  return next;
+}
+
+const clock = (seconds) => {
+  const value = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(value / 3600), minutes = Math.floor(value % 3600 / 60), secs = value % 60;
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}` : `${minutes}:${String(secs).padStart(2, "0")}`;
+};
+function MediaPlayer({ item, onClose, onProgress }) {
+  const video = useRef(null), frame = useRef(null), lastSaved = useRef(0), audioGraph = useRef(null);
+  const duration = Number(item.duration) || 0;
+  const transcoding = /\.(mkv|avi)$/i.test(item.filename || "");
+  const initialPosition = Math.min(duration, Math.max(0, Number(item.progress || 0) * duration));
+  const [base, setBase] = useState(transcoding ? initialPosition : 0);
+  const [position, setPosition] = useState(initialPosition);
+  const [paused, setPaused] = useState(false);
+  const [volume, setVolume] = useState(100);
+  const id = item.mediaId || item.id;
+  const source = mediaUrl(transcoding ? `/transcode/${id}?start=${base}` : `/stream/${id}`, item);
+  const applyVolume = (nextValue) => {
+    const level = Math.max(0, Math.min(300, Number(nextValue)));
+    setVolume(level);
+    if (!video.current) return;
+    video.current.volume = Math.min(1, level / 100);
+    if (level > 100) {
+      try {
+        if (!audioGraph.current || audioGraph.current.element !== video.current) {
+          audioGraph.current?.context.close();
+          const context = new AudioContext(), gain = context.createGain(), sourceNode = context.createMediaElementSource(video.current);
+          sourceNode.connect(gain).connect(context.destination);
+          audioGraph.current = { context, gain, element: video.current };
+        }
+        audioGraph.current.context.resume();
+        audioGraph.current.gain.gain.value = level / 100;
+      } catch {
+        setVolume(100);
+        video.current.volume = 1;
+      }
+    } else if (audioGraph.current) audioGraph.current.gain.gain.value = 1;
+  };
+  const persist = (force = false) => {
+    if (!duration || !force && Math.abs(position - lastSaved.current) < 5) return;
+    lastSaved.current = position;
+    onProgress(item, position, duration);
+  };
+  const loaded = () => {
+    if (!transcoding && initialPosition > 0 && video.current) video.current.currentTime = initialPosition;
+    applyVolume(volume);
+    video.current?.play().catch(() => setPaused(true));
+  };
+  const timeUpdate = () => {
+    const absolute = Math.min(duration || Infinity, (transcoding ? base : 0) + Number(video.current?.currentTime || 0));
+    setPosition(absolute);
+    if (duration && absolute - lastSaved.current >= 5) {
+      lastSaved.current = absolute;
+      onProgress(item, absolute, duration);
+    }
+  };
+  const seek = (target) => {
+    const next = Math.max(0, Math.min(duration, Number(target)));
+    setPosition(next);
+    if (transcoding) setBase(next);
+    else if (video.current) video.current.currentTime = next;
+  };
+  const close = () => { persist(true); onClose(); };
+  const toggleVideoFullscreen = () => document.fullscreenElement ? document.exitFullscreen() : frame.current?.requestFullscreen();
+  return (
+    <div className="vynodePlayer" ref={frame}>
+      <video ref={video} key={source} crossOrigin="anonymous" autoPlay src={source} onDoubleClick={toggleVideoFullscreen} onLoadedMetadata={loaded} onTimeUpdate={timeUpdate} onPlay={() => setPaused(false)} onPause={() => { setPaused(true); persist(true); }} onEnded={() => onProgress(item, duration, duration)}>
+        {(item.subtitles || []).map((subtitle) => <track key={subtitle.index} kind="subtitles" label={subtitle.label} src={mediaUrl(`/api/subtitles/${id}/${subtitle.index}`, item)} />)}
+      </video>
+      <div className="playerControls">
+        <button onClick={() => video.current?.paused ? video.current.play() : video.current?.pause()}>{paused ? "▶" : "❚❚"}</button>
+        <span>{clock(position)}</span>
+        <input aria-label="Playback position" type="range" min="0" max={duration || 1} step="1" value={Math.min(position, duration || 1)} onChange={(event) => seek(event.target.value)} />
+        <span>{duration ? clock(duration) : "Loading…"}</span>
+        <label className="volumeBoost" title="Audio amplification can introduce distortion"><span>🔊 {volume}%</span><input aria-label="Volume and audio boost" type="range" min="0" max="300" step="5" value={volume} onChange={(event) => applyVolume(event.target.value)} /></label>
+        <button onClick={toggleVideoFullscreen} title="Video fullscreen">⛶</button>
+        <button onClick={close}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+function AccountGate() {
+  const [account, setAccount] = useState(savedCloudAccount());
+  const [checking, setChecking] = useState(Boolean(account?.token));
+  const [mode, setMode] = useState("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!account?.token) return setChecking(false);
+    nativeFetch(`${CLOUD_URL}/v1/servers`, {
+      headers: { Authorization: `Bearer ${account.token}` },
+      signal: AbortSignal.timeout(10000),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error("Your session expired. Please sign in again.");
+      const next = await ensureLocalServerLinked(account).catch((reason) => {
+        setError(`Signed in, but this server is not linked for metadata yet: ${reason.message}`);
+        return account;
+      });
+      localStorage.setItem("vynodeCloud", JSON.stringify(next));
+      setAccount(next);
+    }).catch((reason) => {
+      localStorage.removeItem("vynodeCloud");
+      setAccount(null);
+      setError(reason.name === "TimeoutError" ? "Vynode Cloud did not respond. Sign in again when your connection is available." : reason.message);
+    }).finally(() => setChecking(false));
+  }, []);
+
+  const authenticate = async (event) => {
+    event.preventDefault();
+    setChecking(true);
+    setError("");
+    try {
+      const response = await nativeFetch(`${CLOUD_URL}/v1/accounts/${mode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Account request failed.");
+      const signedIn = { token: result.token, account: result.account };
+      const next = await ensureLocalServerLinked(signedIn).catch((reason) => {
+        setError(`Signed in, but this server is not linked for metadata yet: ${reason.message}`);
+        return signedIn;
+      });
+      localStorage.setItem("vynodeCloud", JSON.stringify(next));
+      setAccount(next);
+    } catch (reason) {
+      setError(reason.name === "TimeoutError" ? "Vynode Cloud did not respond. Check your connection and try again." : reason.message);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  if (checking) return <div className="accountGate"><div className="accountGateCard"><h1>Vynode</h1><p>Securing your media…</p></div></div>;
+  if (account?.token) return <App />;
+  return (
+    <main className="accountGate">
+      <form className="accountGateCard" onSubmit={authenticate}>
+        <span className="eyebrow">VYNODE MEDIA</span>
+        <h1>{mode === "login" ? "Welcome back" : "Create your account"}</h1>
+        <p>Sign in before opening servers, libraries, folders, or settings.</p>
+        <div className="accountModes">
+          <button type="button" className={mode === "login" ? "primary" : "secondary"} onClick={() => setMode("login")}>Sign in</button>
+          <button type="button" className={mode === "register" ? "primary" : "secondary"} onClick={() => setMode("register")}>Create account</button>
+        </div>
+        {mode === "register" && <input className="field" aria-label="Name" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />}
+        <input className="field" aria-label="Email" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        <input className="field" aria-label="Password" type="password" placeholder="Password (10+ characters)" value={password} onChange={(e) => setPassword(e.target.value)} minLength="10" required />
+        {error && <p className="formError">{error}</p>}
+        <button className="primary" disabled={checking}>{mode === "login" ? "Open Vynode" : "Create account"}</button>
+      </form>
+    </main>
+  );
+}
 function VynodeAccount() {
   const stored = () => {
     try {
@@ -1370,7 +1636,7 @@ function VynodeAccount() {
       await nativeFetch("/api/cloud/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serverId: localServer.id, ticket: access.ticket }),
+        body: JSON.stringify({ serverId: localServer.id, serverSecret: localServer.secret, ticket: access.ticket }),
       });
       const next = { ...account, localServer };
       localStorage.setItem("vynodeCloud", JSON.stringify(next));
@@ -1505,7 +1771,9 @@ function Connections() {
       .then((d) => setDevices(d.devices || []))
       .catch(() => {});
   };
-  useEffect(loadLocal, []);
+  useEffect(() => {
+    loadLocal();
+  }, []);
   const startPairing = () =>
     window
       .vynodeLocalFetch("http://127.0.0.1:8787/api/pair/start", {
@@ -1645,6 +1913,28 @@ function Connections() {
   );
 }
 
+function CollectionPoster({ collection, library, preview = false }) {
+  const members = (collection.itemIds || []).map((id) => library.find((item) => item.id === id)).filter(Boolean).slice(0, 4);
+  const style = {
+    "--collection-color": collection.color || "#7256ef",
+    "--collection-accent": collection.accentColor || "#151823",
+    ...(collection.poster ? { backgroundImage: `url(${collection.poster})` } : {}),
+  };
+  return (
+    <div className={`collectionPoster ${collection.poster ? "customPoster" : "autoPoster"} ${preview ? "preview" : ""}`} style={style}>
+      <div className={`collectionMiniPosters count${members.length}`}>
+        {members.map((item) => (
+          <div key={item.id} style={item.artwork || item.poster ? { backgroundImage: `url(${item.artwork || item.poster})` } : {}}>
+            {!item.artwork && !item.poster && <small>{item.title}</small>}
+          </div>
+        ))}
+      </div>
+      <div className="collectionTint" />
+      <span>{collection.name}</span>
+    </div>
+  );
+}
+
 function CollectionsView({ library, data, save, onOpen }) {
   const [editing, setEditing] = useState(null);
   const makeCollection = () =>
@@ -1653,6 +1943,8 @@ function CollectionsView({ library, data, save, onOpen }) {
       name: "New Collection",
       description: "",
       poster: "",
+      color: data.preferences?.accent || "#7256ef",
+      accentColor: "#151823",
       itemIds: [],
     });
   const commit = async () => {
@@ -1691,16 +1983,7 @@ function CollectionsView({ library, data, save, onOpen }) {
             key={collection.id}
             onClick={() => setEditing(collection)}
           >
-            <div
-              className="collectionPoster"
-              style={
-                collection.poster
-                  ? { backgroundImage: `url(${collection.poster})` }
-                  : {}
-              }
-            >
-              <span>{collection.name}</span>
-            </div>
+            <CollectionPoster collection={collection} library={library} />
             <h3>{collection.name}</h3>
             <p>{collection.itemIds.length} titles</p>
           </article>
@@ -1732,6 +2015,16 @@ function CollectionsView({ library, data, save, onOpen }) {
                 setEditing({ ...editing, description: e.target.value })
               }
             />
+            <div className="collectionEditorPreview">
+              <CollectionPoster collection={editing} library={library} preview />
+              <div className="collectionColorControls">
+                <label>Primary color<input type="color" value={editing.color || "#7256ef"} onChange={(e) => setEditing({ ...editing, color: e.target.value })} /></label>
+                <label>Secondary color<input type="color" value={editing.accentColor || "#151823"} onChange={(e) => setEditing({ ...editing, accentColor: e.target.value })} /></label>
+                <div className="collectionSwatches">
+                  {["#7256ef", "#007f8b", "#bd3f5c", "#d17b25", "#39845c", "#3b65c4"].map((color) => <button type="button" key={color} aria-label={`Use ${color}`} style={{ background: color }} onClick={() => setEditing({ ...editing, color })} />)}
+                </div>
+              </div>
+            </div>
             <label className="upload">
               Upload custom poster
               <input
@@ -1740,6 +2033,7 @@ function CollectionsView({ library, data, save, onOpen }) {
                 onChange={(e) => poster(e.target.files[0])}
               />
             </label>
+            {editing.poster && <button className="secondary removeCustomPoster" onClick={() => setEditing({ ...editing, poster: "" })}>Use automatic four-title poster</button>}
             <h3>Choose titles</h3>
             <div className="titlePicker">
               {library.map((item) => (
@@ -1871,4 +2165,31 @@ function OverlayStudio({ library, data, save }) {
     </div>
   );
 }
-createRoot(document.getElementById("root")).render(<App />);
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, details) {
+    console.error("Vynode interface recovered from an error", error, details);
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="accountGate recoveryGate">
+        <div className="accountGateCard">
+          <span className="eyebrow">VYNODE RECOVERY</span>
+          <h1>This page could not finish loading.</h1>
+          <p>Your server and media remain running. Reload the interface to return safely.</p>
+          <button className="primary" onClick={() => location.reload()}>Reload Vynode</button>
+          <button className="secondary" onClick={() => this.setState({ error: null })}>Return without reloading</button>
+          <small className="recoveryError">{this.state.error.message}</small>
+        </div>
+      </main>
+    );
+  }
+}
+createRoot(document.getElementById("root")).render(<AppErrorBoundary><AccountGate /></AppErrorBoundary>);

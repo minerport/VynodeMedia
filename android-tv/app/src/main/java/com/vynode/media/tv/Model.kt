@@ -2,7 +2,7 @@ package com.vynode.media.tv
 
 import org.json.JSONObject
 
-data class Episode(val id: String, val title: String, val season: Int, val episode: Int, val progress: Float)
+data class Episode(val id: String, val title: String, val season: Int, val episode: Int, val progress: Float, val duration: Long = 0)
 data class Season(val number: Int, val title: String, val episodes: List<Episode>)
 data class MediaTitle(
     val id: String,
@@ -12,6 +12,10 @@ data class MediaTitle(
     val libraryName: String,
     val progress: Float,
     val hue: Int,
+    val description: String = "",
+    val rating: String = "",
+    val artwork: String = "",
+    val backdrop: String = "",
     val seasons: List<Season> = emptyList(),
 )
 
@@ -26,7 +30,7 @@ object LibraryParser {
                 val episodesJson = season.optJSONArray("episodes")
                 val episodes = if (episodesJson == null) emptyList() else (0 until episodesJson.length()).map { e ->
                     val episode = episodesJson.getJSONObject(e)
-                    Episode(episode.getString("id"), episode.optString("title", "Episode ${e + 1}"), episode.optInt("season", season.optInt("number", 1)), episode.optInt("episode", e + 1), episode.optDouble("progress", 0.0).toFloat())
+                    Episode(episode.getString("id"), episode.optString("title", "Episode ${e + 1}"), episode.optInt("season", season.optInt("number", 1)), episode.optInt("episode", e + 1), episode.optDouble("progress", 0.0).toFloat(), (episode.optDouble("duration", 0.0) * 1000).toLong())
                 }
                 Season(season.optInt("number", s + 1), season.optString("title", "Season ${s + 1}"), episodes)
             }
@@ -38,6 +42,10 @@ object LibraryParser {
                 libraryName = item.optString("libraryName", "Library"),
                 progress = item.optDouble("progress", 0.0).toFloat(),
                 hue = item.optInt("hue", (index * 47 + 215) % 360),
+                description = item.optString("description"),
+                rating = item.optString("rating"),
+                artwork = item.optString("artwork", item.optString("poster")),
+                backdrop = item.optString("backdrop"),
                 seasons = seasons,
             )
         }

@@ -8,6 +8,7 @@ services:
     environment:
       PORT: "8790"
       DATA_DIR: /data
+      TMDB_READ_TOKEN: ${TMDB_READ_TOKEN:-}
     volumes:
       - /mnt/user/appdata/vynode-cloud/data:/data
     security_opt: ["no-new-privileges:true"]

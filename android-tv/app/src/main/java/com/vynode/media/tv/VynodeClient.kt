@@ -10,6 +10,11 @@ class VynodeClient(private val config: ServerConfig) {
         val values = JSONObject(request("/api/customization")).optJSONObject("trailers") ?: return emptyMap()
         return values.keys().asSequence().associateWith { values.optString(it) }.filterValues { it.isNotBlank() }
     }
+    fun watchlist(): Set<String> {
+        val values = JSONObject(request("/api/watchlist")).optJSONArray("watchlist") ?: return emptySet()
+        return (0 until values.length()).map { values.optString(it) }.filter { it.isNotBlank() }.toSet()
+    }
+    fun setWatchlisted(id: String, enabled: Boolean) { request("/api/watchlist/$id", if (enabled) "POST" else "DELETE") }
     fun claim(code: String): String {
         val body = JSONObject().put("code", code.uppercase()).put("name", "NVIDIA Shield TV").toString()
         return JSONObject(request("/api/pair/claim", "POST", body)).getString("token")

@@ -11,6 +11,10 @@ class VynodeCloudClient(private val accountToken: String = "") {
         val result = JSONObject(request("/v1/accounts/login", "POST", JSONObject().put("email", email.trim()).put("password", password).toString()))
         return result.getString("token")
     }
+    fun register(name: String, email: String, password: String): String {
+        val body = JSONObject().put("name", name.trim()).put("email", email.trim()).put("password", password).toString()
+        return JSONObject(request("/v1/accounts/register", "POST", body)).getString("token")
+    }
     fun servers(): List<CloudServer> {
         val values = JSONObject(request("/v1/servers")).optJSONArray("servers") ?: return emptyList()
         return (0 until values.length()).map { index ->

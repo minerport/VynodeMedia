@@ -7,6 +7,7 @@ import { execFile, spawn } from "node:child_process";
 import ffmpegStatic from "ffmpeg-static";
 import ffprobeStatic from "ffprobe-static";
 import os from "node:os";
+import { identifyMedia } from "./media-identification.js";
 
 const app = express();
 app.use(express.json({ limit: "15mb" }));
@@ -16,6 +17,8 @@ const stateFile = path.join(dataDir, "progress.json");
 const settingsFile = path.join(dataDir, "settings.json");
 const customizationFile = path.join(dataDir, "customization.json");
 const probeCacheFile = path.join(dataDir, "probe-cache.json");
+const validationCacheFile = path.join(dataDir, "media-validation.json");
+const metadataCacheFile = path.join(dataDir, "metadata-cache.json");
 const devicesFile = path.join(dataDir, "devices.json");
 const serverIdentityFile = path.join(dataDir, "server-identity.json");
 const cloudIdentityFile = path.join(dataDir, "cloud-identity.json");
@@ -72,7 +75,7 @@ const mediaSources = () =>
     library.folders.map((folder, index) => ({
       id: library.id,
       name: library.name,
-      type: library.type,
+      type: library.type === "auto" && /(?:^|[\\/])(movies?|films?)(?:[\\/]|$)/i.test(folder) ? "movies" : library.type === "auto" && /(?:^|[\\/])(tv|tv shows?|shows?|series)(?:[\\/]|$)/i.test(folder) ? "tv" : library.type,
       path: folder,
       folderId: `${library.id}:${index}`,
     })),
@@ -84,13 +87,19 @@ const readCustomization = () => {
     return { collections: [], overlays: {} };
   }
 };
-const titleOf = (f) =>
-  path
+const titleOf = (f) => {
+  const cleaned = path
     .basename(f, path.extname(f))
     .replace(/[._]/g, " ")
     .replace(/\s+/g, " ")
-    .replace(/\b(19|20)\d{2}\b/g, "")
     .trim();
+  return cleaned
+    .replace(/\s*[\[(].*?[\])]/g, " ")
+    .replace(/\s+\b(?:19|20)\d{2}\b.*$/i, "")
+    .replace(/\s+\b(?:2160p|1080p|720p|480p|uhd|bluray|brrip|webrip|web[ .-]?dl|hdtv|x26[45]|h[ .-]?26[45]|hevc|av1)\b.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+};
 const unpackedBinary = (value) =>
   value?.replace("app.asar", "app.asar.unpacked");
 const ffmpegPath = unpackedBinary(ffmpegStatic);
@@ -128,6 +137,16 @@ const subtitlesFor = (file) => {
     return [];
   }
 };
+const localMetadataFor = (file) => {
+  const candidates = [file.replace(/\.[^.]+$/, ".nfo"), path.join(path.dirname(file), "movie.nfo"), path.join(path.dirname(file), "tvshow.nfo")];
+  const nfo = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!nfo) return {};
+  try {
+    const xml = fs.readFileSync(nfo, "utf8");
+    const value = (tag) => xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"))?.[1]?.replace(/<!\[CDATA\[|\]\]>/g, "").trim();
+    return Object.fromEntries(Object.entries({ title: value("title"), year: value("year"), description: value("plot") || value("outline"), rating: value("rating"), genres: [...xml.matchAll(/<genre[^>]*>([\s\S]*?)<\/genre>/gi)].map((match) => match[1].trim()) }).filter(([, value]) => value !== undefined && value !== "" && (!Array.isArray(value) || value.length)));
+  } catch { return {}; }
+};
 const readDevices = () => {
   try {
     return JSON.parse(fs.readFileSync(devicesFile, "utf8"));
@@ -160,6 +179,50 @@ const readCloudIdentity = () => {
     return null;
   }
 };
+const readMetadataCache = () => {
+  try { return JSON.parse(fs.readFileSync(metadataCacheFile, "utf8")); }
+  catch { return {}; }
+};
+const writeMetadataCache = (cache) => {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(metadataCacheFile, JSON.stringify(cache, null, 2), { mode: 0o600 });
+};
+function applyOnlineMetadata(mediaItems) {
+  const cache = readMetadataCache();
+  return mediaItems.map((item) => {
+    const online = cache[item.id]?.metadata || {};
+    const seasons = item.seasons?.map((season) => {
+      const onlineSeason = online.seasons?.find((entry) => entry.number === season.number) || {};
+      return { ...onlineSeason, ...season, episodes: season.episodes.map((episode) => ({ ...(cache[episode.id]?.metadata || {}), ...(onlineSeason.episodes?.find((entry) => entry.episode === episode.episode) || {}), ...episode })) };
+    });
+    return { ...online, ...item, ...(seasons ? { seasons } : {}), metadataStatus: cache[item.id]?.status || "pending", metadataConfidence: cache[item.id]?.confidence || 0, metadataCandidates: cache[item.id]?.candidates || [] };
+  });
+}
+let metadataRefreshRunning = false;
+async function refreshOnlineMetadata(mediaItems, force = false) {
+  if (metadataRefreshRunning) return;
+  const identity = readCloudIdentity();
+  if (!identity?.serverSecret) return;
+  metadataRefreshRunning = true;
+  try {
+    const cache = readMetadataCache();
+    for (const item of mediaItems) {
+      const previous = cache[item.id], fingerprint = `${item.kind}:${item.title}:${item.year || ""}:${item.seasons?.map((season) => season.number).join(",") || ""}`;
+      if (!force && previous?.fingerprint === fingerprint && Date.now() - Number(previous.checkedAt || 0) < 30 * 24 * 60 * 60_000) continue;
+      try {
+        const response = await fetch(`${cloudUrl}/v1/metadata/match`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${identity.serverSecret}` }, body: JSON.stringify({ type: item.kind === "Series" ? "tv" : "movie", title: item.title, year: item.year, tmdbId: previous?.manualTmdbId, seasons: item.seasons?.map((season) => season.number) || [], language: readSettings().metadataLanguage || "en-US" }), signal: AbortSignal.timeout(30_000) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Metadata service returned ${response.status}.`);
+        cache[item.id] = { fingerprint, checkedAt: Date.now(), status: result.matched ? "matched" : "unmatched", confidence: result.confidence || 0, candidates: result.candidates || [], metadata: result.metadata || {}, ...(previous?.manualTmdbId ? { manualTmdbId: previous.manualTmdbId } : {}) };
+        if (result.metadata?.seasons) for (const season of item.seasons || []) for (const episode of season.episodes) {
+          const online = result.metadata.seasons.find((entry) => entry.number === season.number)?.episodes?.find((entry) => entry.episode === episode.episode);
+          if (online) cache[episode.id] = { checkedAt: Date.now(), status: "matched", metadata: online };
+        }
+      } catch (error) { cache[item.id] = { ...previous, fingerprint, checkedAt: Date.now(), status: "error", error: error.message }; }
+      writeMetadataCache(cache);
+    }
+  } finally { metadataRefreshRunning = false; }
+}
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 const isLocalRequest = (req) =>
@@ -219,9 +282,71 @@ function scan(dir, files = []) {
   for (const e of entries) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) scan(p, files);
-    else if (videoExt.has(path.extname(e.name).toLowerCase())) files.push(p);
+    else if (videoExt.has(path.extname(e.name).toLowerCase()) && isRealVideo(p)) files.push(p);
   }
   return files;
+}
+let validationCache;
+const validationQueued = new Set();
+const validationJobs = [];
+let validationActive = 0;
+const eventClients = new Set();
+function broadcastLibraryChanged() {
+  for (const response of eventClients) response.write("event: library\ndata: changed\n\n");
+}
+function readValidationCache() {
+  if (validationCache) return validationCache;
+  try { validationCache = JSON.parse(fs.readFileSync(validationCacheFile, "utf8")); }
+  catch { validationCache = {}; }
+  return validationCache;
+}
+function saveValidationCache() {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(validationCacheFile, JSON.stringify(readValidationCache()));
+}
+function runValidationQueue() {
+  while (validationActive < 2 && validationJobs.length) {
+    const job = validationJobs.shift();
+    validationActive += 1;
+    execFile(ffprobePath, ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type", "-of", "json", job.file], { encoding: "utf8", timeout: 15000, windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      let valid = false;
+      try { valid = !error && JSON.parse(stdout).streams?.some((stream) => stream.codec_type === "video") === true; }
+      catch {}
+      readValidationCache()[job.file] = { mtime: job.mtime, size: job.size, valid, checkedAt: Date.now() };
+      try { saveValidationCache(); } catch {}
+      validationQueued.delete(job.file);
+      validationActive -= 1;
+      broadcastLibraryChanged();
+      runValidationQueue();
+    });
+  }
+}
+function queueVideoValidation(file, stat) {
+  if (validationQueued.has(file)) return;
+  validationQueued.add(file);
+  validationJobs.push({ file, mtime: stat.mtimeMs, size: stat.size });
+  setImmediate(runValidationQueue);
+}
+function isRealVideo(file) {
+  try {
+    const stat = fs.statSync(file), cache = readValidationCache(), previous = cache[file];
+    if (previous?.mtime === stat.mtimeMs && previous?.size === stat.size) return previous.valid === true;
+    queueVideoValidation(file, stat);
+    return false;
+  } catch {
+    try {
+      const stat = fs.statSync(file), cache = readValidationCache();
+      cache[file] = { mtime: stat.mtimeMs, size: stat.size, valid: false, checkedAt: Date.now() };
+      fs.mkdirSync(dataDir, { recursive: true }); fs.writeFileSync(validationCacheFile, JSON.stringify(cache));
+    } catch {}
+    return false;
+  }
+}
+function cachedDuration(id, mtime) {
+  try {
+    const entry = JSON.parse(fs.readFileSync(probeCacheFile, "utf8"))[id];
+    return entry?.mtime === mtime ? Number(entry.data?.format?.duration) || 0 : 0;
+  } catch { return 0; }
 }
 function items() {
   const state = readState(),
@@ -233,24 +358,20 @@ function items() {
     scan(source.path).forEach((file, i) => {
       const root = source.path;
       const stat = fs.statSync(file);
+      const localMetadata = localMetadataFor(file);
       const id = mediaId(file);
       const rel = path.relative(root, file);
       const parts = rel.split(path.sep);
-      const seriesLike =
-        source.type === "tv" ||
-        (source.type !== "movies" &&
-          /(^|[\\/])(tv|shows?|series)([\\/]|$)|s\d{1,2}e\d{1,3}|season\s*\d+/i.test(
-            rel,
-          ));
-      const year = (file.match(/\b(19|20)\d{2}\b/) || [])[0];
-      const episodeMatch = rel.match(/s(\d{1,2})e(\d{1,3})/i);
-      const seasonMatch = rel.match(/season[ ._-]*(\d{1,2})/i);
+      const identity = identifyMedia(file, root, source.type);
+      if (!identity.matchesLibrary) return;
+      const seriesLike = identity.type === "tv";
+      const year = identity.year;
       if (seriesLike) {
         const marker = parts.findIndex((p) => /^(tv|shows?|series)$/i.test(p));
         const seriesTitle =
           marker >= 0 && parts[marker + 1]
             ? titleOf(parts[marker + 1])
-            : titleOf(parts.find((p) => !/^season/i.test(p)) || file);
+            : titleOf(identity.showPart);
         const seriesKey = path.join(root, seriesTitle);
         const seriesId = crypto
           .createHash("sha1")
@@ -271,9 +392,9 @@ function items() {
             libraryName: source.name,
           });
         const show = shows.get(seriesId);
-        const seasonNumber = Number(episodeMatch?.[1] || seasonMatch?.[1] || 1);
+        const seasonNumber = identity.season;
         const episodeNumber = Number(
-          episodeMatch?.[2] ||
+          identity.episode ||
             (show.seasons.get(seasonNumber)?.length || 0) + 1,
         );
         if (!show.seasons.has(seasonNumber)) show.seasons.set(seasonNumber, []);
@@ -283,11 +404,13 @@ function items() {
             titleOf(file)
               .replace(/s\d{1,2}e\d{1,3}/i, "")
               .trim() || `Episode ${episodeNumber}`,
+          ...localMetadata,
           season: seasonNumber,
           episode: episodeNumber,
           filename: path.basename(file),
           file,
           progress: state[id] || 0,
+          duration: cachedDuration(id, stat.mtimeMs),
           subtitles: subtitlesFor(file).map(
             ({ path: subtitlePath, ...subtitle }) => subtitle,
           ),
@@ -298,13 +421,16 @@ function items() {
       records.push({
         id,
         title: titleOf(file),
+        ...localMetadata,
         year: year || "",
         kind: seriesLike ? "Series" : "Movie",
+        mediaType: "movie",
         file,
         filename: path.basename(file),
         size: stat.size,
         added: stat.mtimeMs,
         progress: state[id] || 0,
+        duration: cachedDuration(id, stat.mtimeMs),
         subtitles: subtitlesFor(file).map(
           ({ path: subtitlePath, ...subtitle }) => subtitle,
         ),
@@ -333,9 +459,12 @@ function items() {
   return records.sort((a, b) => b.added - a.added);
 }
 app.get("/api/remote/status", (req, res) => {
-  const addresses = Object.values(os.networkInterfaces())
-    .flat()
-    .filter((entry) => entry?.family === "IPv4" && !entry.internal)
+  const virtualAdapter = /(?:vEthernet|WSL|Hyper-V|Docker|VMware|VirtualBox|Loopback|Bluetooth)/i;
+  const addresses = Object.entries(os.networkInterfaces())
+    .filter(([name]) => !virtualAdapter.test(name))
+    .flatMap(([, entries]) => entries || [])
+    .filter((entry) => entry?.family === "IPv4" && !entry.internal && entry.address !== "0.0.0.0")
+    .sort((a, b) => Number(!/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(a.address)) - Number(!/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(b.address)))
     .map((entry) => `http://${entry.address}:${process.env.PORT || 8787}`);
   res.json({
     server: serverIdentity(),
@@ -397,8 +526,12 @@ app.post("/api/cloud/config", async (req, res) => {
     const result = await response.json();
     if (!response.ok || !result.authorized)
       return res.status(401).json({ error: result.error || "Cloud ownership verification failed." });
+    const serverSecret = String(req.body.serverSecret || "");
+    if (serverSecret.length < 32)
+      return res.status(400).json({ error: "Server credential is required." });
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(cloudIdentityFile, JSON.stringify({ serverId, ownerId: result.account?.id, configuredAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    fs.writeFileSync(cloudIdentityFile, JSON.stringify({ serverId, serverSecret, ownerId: result.account?.id, configuredAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    setImmediate(() => refreshOnlineMetadata(items(), true));
     res.json({ ok: true, serverId });
   } catch {
     res.status(502).json({ error: "Vynode Cloud could not be reached." });
@@ -454,14 +587,42 @@ app.get("/api/health", (_, res) =>
 );
 app.get("/api/library", (_, res) => {
   const sources = mediaSources(),
-    library = items().map(({ file, ...x }) => x);
+    scanned = items(),
+    library = applyOnlineMetadata(scanned).map(({ file, ...x }) => x);
   res.json({
     items: library,
     path: sources[0]?.path || null,
     sources,
     libraries: configuredLibraries(),
     needsSetup: !sources.length,
+    validating: validationQueued.size,
   });
+  setImmediate(() => refreshOnlineMetadata(scanned));
+});
+app.post("/api/metadata/refresh", (_, res) => {
+  const scanned = items();
+  refreshOnlineMetadata(scanned, true);
+  res.status(202).json({ ok: true, queued: scanned.length });
+});
+app.get("/api/metadata/status", (_, res) => {
+  const values = Object.values(readMetadataCache());
+  res.json({ configured: Boolean(readCloudIdentity()?.serverSecret), provider: "tmdb", matched: values.filter((entry) => entry.status === "matched").length, unmatched: values.filter((entry) => entry.status === "unmatched").length, errors: values.filter((entry) => entry.status === "error").length });
+});
+app.post("/api/metadata/:id/match", (req, res) => {
+  const tmdbId = Number(req.body.tmdbId || 0), scanned = items(), item = scanned.find((entry) => entry.id === req.params.id);
+  if (!item) return res.sendStatus(404);
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) return res.status(400).json({ error: "Enter a valid TMDB numeric ID." });
+  const cache = readMetadataCache();
+  cache[item.id] = { ...(cache[item.id] || {}), manualTmdbId: tmdbId, checkedAt: 0 };
+  writeMetadataCache(cache);
+  refreshOnlineMetadata([item], true);
+  res.status(202).json({ ok: true, tmdbId });
+});
+app.delete("/api/metadata/:id", (req, res) => {
+  const cache = readMetadataCache();
+  delete cache[req.params.id];
+  writeMetadataCache(cache);
+  res.json({ ok: true });
 });
 app.post("/api/settings", (req, res) => {
   const selected = String(req.body.mediaPath || "");
@@ -617,6 +778,24 @@ app.delete("/api/sources/:id", (req, res) => {
   res.json({ sources });
 });
 app.get("/api/customization", (_, res) => res.json(readCustomization()));
+app.get("/api/watchlist", (_, res) => {
+  const customization = readCustomization();
+  res.json({ watchlist: Array.isArray(customization.watchlist) ? customization.watchlist : [] });
+});
+app.post("/api/watchlist/:id", (req, res) => {
+  const customization = readCustomization();
+  const watchlist = [...new Set([...(Array.isArray(customization.watchlist) ? customization.watchlist : []), String(req.params.id)])].slice(0, 10000);
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(customizationFile, JSON.stringify({ ...customization, watchlist }, null, 2));
+  res.json({ ok: true, watchlist });
+});
+app.delete("/api/watchlist/:id", (req, res) => {
+  const customization = readCustomization();
+  const watchlist = (Array.isArray(customization.watchlist) ? customization.watchlist : []).filter((id) => String(id) !== String(req.params.id));
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(customizationFile, JSON.stringify({ ...customization, watchlist }, null, 2));
+  res.json({ ok: true, watchlist });
+});
 app.post("/api/customization", (req, res) => {
   const collections = Array.isArray(req.body.collections)
     ? req.body.collections.slice(0, 100).map((c) => ({
@@ -627,6 +806,8 @@ app.post("/api/customization", (req, res) => {
           typeof c.poster === "string" && c.poster.length < 12_000_000
             ? c.poster
             : "",
+        color: /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : "#7256ef",
+        accentColor: /^#[0-9a-f]{6}$/i.test(c.accentColor) ? c.accentColor : "#151823",
         itemIds: Array.isArray(c.itemIds)
           ? c.itemIds.map(String).slice(0, 5000)
           : [],
@@ -652,11 +833,14 @@ app.post("/api/customization", (req, res) => {
     req.body.artwork && typeof req.body.artwork === "object"
       ? req.body.artwork
       : {};
+  const watchlist = Array.isArray(req.body.watchlist)
+    ? [...new Set(req.body.watchlist.map(String))].slice(0, 10000)
+    : [];
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(
     customizationFile,
     JSON.stringify(
-      { collections, overlays, trailers, preferences, metadata, artwork },
+      { collections, overlays, trailers, preferences, metadata, artwork, watchlist },
       null,
       2,
     ),
@@ -669,6 +853,7 @@ app.post("/api/customization", (req, res) => {
     preferences,
     metadata,
     artwork,
+    watchlist,
   });
 });
 app.post("/api/progress/:id", (req, res) => {
@@ -760,6 +945,7 @@ app.get("/api/events", (req, res) => {
     Connection: "keep-alive",
   });
   res.flushHeaders();
+  eventClients.add(res);
   let timer;
   const notify = () => {
     clearTimeout(timer);
@@ -780,6 +966,7 @@ app.get("/api/events", (req, res) => {
     .filter(Boolean);
   const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 25000);
   req.on("close", () => {
+    eventClients.delete(res);
     clearInterval(heartbeat);
     clearTimeout(timer);
     watchers.forEach((watcher) => watcher.close());
@@ -788,15 +975,20 @@ app.get("/api/events", (req, res) => {
 app.get("/transcode/:id", (req, res) => {
   const file = resolveMediaFile(req.params.id);
   if (!file) return res.sendStatus(404);
+  const duration = cachedDuration(req.params.id, fs.statSync(file).mtimeMs);
+  const start = Math.max(0, Number(req.query.start) || 0);
   res.type("video/mp4");
+  res.setHeader("X-Content-Duration", String(Math.max(0, duration - start)));
   const process = spawn(
     ffmpegPath,
     [
       "-hide_banner",
       "-loglevel",
       "error",
+      ...(start ? ["-ss", String(start)] : []),
       "-i",
       file,
+      ...(duration > start ? ["-t", String(duration - start)] : []),
       "-map",
       "0:v:0",
       "-map",
@@ -819,7 +1011,7 @@ app.get("/transcode/:id", (req, res) => {
   );
   process.stdout.pipe(res);
   process.stderr.on("data", () => {});
-  req.on("close", () => process.kill());
+  res.on("close", () => process.kill());
   process.on("error", () => {
     if (!res.headersSent) res.sendStatus(500);
   });
@@ -829,11 +1021,12 @@ app.get("/stream/:id", (req, res) => {
   const item = file ? { file } : null;
   if (!item) return res.sendStatus(404);
   const stat = fs.statSync(item.file);
+  const contentType = ({ ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm" })[path.extname(item.file).toLowerCase()] || "application/octet-stream";
   const range = req.headers.range;
   if (!range) {
     res.set({
       "Content-Length": stat.size,
-      "Content-Type": "video/mp4",
+      "Content-Type": contentType,
       "Accept-Ranges": "bytes",
     });
     return fs.createReadStream(item.file).pipe(res);
@@ -845,13 +1038,13 @@ app.get("/stream/:id", (req, res) => {
     "Content-Range": `bytes ${start}-${end}/${stat.size}`,
     "Accept-Ranges": "bytes",
     "Content-Length": end - start + 1,
-    "Content-Type": "video/mp4",
+    "Content-Type": contentType,
   });
   fs.createReadStream(item.file, { start, end }).pipe(res);
 });
 app.use(express.static(path.join(appRoot, "dist")));
 app.use((req, res) => res.sendFile(path.join(appRoot, "dist", "index.html")));
-app.listen(Number(process.env.PORT) || 8787, () =>
+app.listen(Number(process.env.PORT) || 8787, "0.0.0.0", () =>
   console.log(
     `Vynode Media server: http://localhost:${process.env.PORT || 8787}`,
   ),

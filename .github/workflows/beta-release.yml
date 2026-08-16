@@ -24,7 +24,7 @@ jobs:
         with:
           prerelease: true
           generate_release_notes: true
-          files: release/Vynode-Media-*-Windows.exe
+          files: release/Vynode-Media-*-Windows-Setup.exe
 
   docker:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/minerport/vynodemedia:${{ github.ref_name }}
             ghcr.io/minerport/vynodemedia:beta
