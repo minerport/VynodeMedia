@@ -21,6 +21,10 @@ test("account ownership produces one single-use server access ticket", async (co
   const server = await call("/v1/servers/register", { method: "POST", headers: accountHeaders, body: JSON.stringify({ name: "Living Room" }) });
   const serverId = server.body.serverId;
   await call(`/v1/servers/${serverId}/heartbeat`, { method: "POST", headers: { Authorization: `Bearer ${server.body.serverSecret}` }, body: JSON.stringify({ endpoints: ["http://10.0.0.86:8787"] }) });
+  const deniedMetadata = await call("/v1/metadata/match", { method: "POST", body: JSON.stringify({ type: "movie", title: "Arrival", year: "2016" }) });
+  assert.equal(deniedMetadata.response.status, 401);
+  const unavailableMetadata = await call("/v1/metadata/match", { method: "POST", headers: { Authorization: `Bearer ${server.body.serverSecret}` }, body: JSON.stringify({ type: "movie", title: "Arrival", year: "2016" }) });
+  assert.equal(unavailableMetadata.response.status, 503);
   const access = await call(`/v1/servers/${serverId}/access`, { method: "POST", headers: accountHeaders, body: "{}" });
   assert.ok(access.body.ticket);
   const verified = await call("/v1/access/verify", { method: "POST", body: JSON.stringify({ ticket: access.body.ticket, serverId }) });

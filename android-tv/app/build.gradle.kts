@@ -17,8 +17,8 @@ android {
         applicationId = "com.vynode.media.tv"
         minSdk = 26
         targetSdk = 36
-        versionCode = 50004
-        versionName = "0.5.0-beta.4"
+        versionCode = 50101
+        versionName = "0.5.10-beta.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -51,6 +51,7 @@ dependencies {
     implementation(composeBom)
     androidTestImplementation(composeBom)
     implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.tv:tv-material:1.0.0")
@@ -58,6 +59,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.media3:media3-exoplayer:1.10.1")
     implementation("androidx.media3:media3-ui:1.10.1")
+    implementation("io.coil-kt:coil-compose:2.7.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")

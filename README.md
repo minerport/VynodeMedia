@@ -14,11 +14,16 @@ Vynode Media is a private, self-hosted media library, player, and universal clie
 - Watch progress, trailers, collections, custom posters, and title overlays
 - Grid, compact, and list layouts with saved appearance settings
 - Account-based server discovery, cloud access tickets, and revocable device tokens
+- Server-side TMDB matching and cached movies, series, seasons, episodes, cast, trailers, and artwork
 - Vynode Cloud discovery through `https://media.vynodehub.com`
+
+## Online metadata
+
+Vynode Cloud owns the provider credential, so it is never included in Windows, Android, Docker client code, or an APK. Copy `cloud/.env.example` to `cloud/.env`, set `TMDB_READ_TOKEN` to a TMDB API Read Access Token, and restart only the `vynode-cloud` container. Linked servers match new media automatically and retain results locally. NFO data and user edits stay higher priority. Detail pages include **Fix match** for a known numeric TMDB ID and **Refresh metadata**.
 
 ## Windows
 
-Download the portable Windows executable from Releases. Configuration happens inside the app; no `.env` file is required.
+Download the Windows Setup executable from Releases. The installer shows detailed progress, creates shortcuts, and preserves libraries and watch history during upgrades. Configuration happens inside the app; no `.env` file is required.
 
 ## Docker Compose
 
@@ -53,4 +58,4 @@ Create a production web build with `npm run build`, a Windows package with `npm 
 
 ## NVIDIA Shield / Android TV
 
-The native Kotlin and Jetpack Compose for TV client lives in [`android-tv`](android-tv). It provides remote-first combined library browsing, movie/series/season/episode details, secure device pairing, and Media3 playback while preserving the Vynode desktop visual identity. See [`android-tv/README.md`](android-tv/README.md) for Android Studio, command-line, signing, release, Downloader, ADB, and upgrade instructions.
+The native Kotlin and Jetpack Compose for TV client lives in [`android-tv`](android-tv). It provides remote-first Movies and TV shelves, Continue Watching, Watchlist, metadata artwork, movie/series/season/episode details, secure account-based server discovery, and Media3 playback while preserving the Vynode desktop visual identity. See [`android-tv/README.md`](android-tv/README.md) for Android Studio, command-line, signing, release, Downloader, ADB, and upgrade instructions.

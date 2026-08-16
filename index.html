@@ -1,1 +1,19 @@
-<div id="root"></div><script type="module" src="/src/main.jsx"></script>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vynode Media</title>
+    <style>
+      html,body,#root{height:100%;margin:0}body{background:#080a0f;color:#f7f8ff;font-family:Inter,Segoe UI,sans-serif}
+      .vynode-boot{height:100%;display:grid;place-items:center;background:radial-gradient(circle at 50% 35%,#132953 0,#080a0f 55%)}
+      .vynode-boot-card{text-align:center}.vynode-boot-logo{display:inline-grid;place-items:center;width:62px;height:62px;border-radius:17px;background:linear-gradient(145deg,#36e6ff,#735cff);font-size:34px;font-weight:800;box-shadow:0 0 36px #35dfff55}
+      .vynode-boot h1{margin:18px 0 7px;font-size:25px}.vynode-boot p{margin:0;color:#aab3c7;font-size:15px}.vynode-boot-error{max-width:620px;color:#ff9cae;white-space:pre-wrap}
+    </style>
+  </head>
+  <body>
+    <div id="root"><div class="vynode-boot"><div class="vynode-boot-card"><div class="vynode-boot-logo">V</div><h1>Vynode Media</h1><p id="vynode-boot-status">Starting your media experience…</p></div></div></div>
+    <script>window.addEventListener('error',function(e){var x=document.getElementById('vynode-boot-status');if(x){x.className='vynode-boot-error';x.textContent='Vynode could not finish starting. '+(e.message||'Unknown startup error.')}});window.addEventListener('unhandledrejection',function(e){var x=document.getElementById('vynode-boot-status');if(x){x.className='vynode-boot-error';x.textContent='Vynode could not finish starting. '+(e.reason&&e.reason.message||e.reason||'Unknown startup error.')}})</script>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

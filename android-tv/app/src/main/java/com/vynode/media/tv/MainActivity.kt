@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -43,7 +44,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -54,6 +59,7 @@ import androidx.tv.material3.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import coil.compose.AsyncImage
 
 private val Ink = Color(0xFF080A0F)
 private val Panel = Color(0xFF11141C)
@@ -64,22 +70,28 @@ private val Muted = Color(0xFF9298A8)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.getInsetsController(window, window.decorView).let { it.hide(WindowInsetsCompat.Type.systemBars()); it.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE }
         setContent { VynodeTheme { VynodeTvApp() } }
     }
 }
 
-data class TvState(val config: ServerConfig = ServerConfig(), val accountToken: String = "", val servers: List<CloudServer> = emptyList(), val loading: Boolean = false, val titles: List<MediaTitle> = emptyList(), val trailers: Map<String, String> = emptyMap(), val error: String? = null, val selected: MediaTitle? = null, val playing: Episode? = null)
+data class TvState(val config: ServerConfig = ServerConfig(), val accountToken: String = "", val servers: List<CloudServer> = emptyList(), val loading: Boolean = false, val titles: List<MediaTitle> = emptyList(), val trailers: Map<String, String> = emptyMap(), val watchlist: Set<String> = emptySet(), val error: String? = null, val selected: MediaTitle? = null, val playing: Episode? = null)
 
 class TvViewModel(application: Application) : AndroidViewModel(application) {
     private val store = ServerConfigStore(application)
     var state by mutableStateOf(TvState(config = store.load(), accountToken = store.accountToken())); private set
     init { when { state.accountToken.isBlank() -> Unit; state.config.url.isNotBlank() && state.config.token.isNotBlank() -> refresh(); else -> loadServers() } }
-    fun login(email: String, password: String) { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeCloudClient().login(email, password) } }.onSuccess { token -> store.saveAccountToken(token); state = state.copy(accountToken = token, loading = false); loadServers() }.onFailure { state = state.copy(loading = false, error = it.message) } } }
+    fun authenticate(register: Boolean, name: String, email: String, password: String) { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeCloudClient().let { if (register) it.register(name, email, password) else it.login(email, password) } } }.onSuccess { token -> store.saveAccountToken(token); state = state.copy(accountToken = token, loading = false); loadServers() }.onFailure { state = state.copy(loading = false, error = it.message) } } }
     fun loadServers() { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeCloudClient(state.accountToken).servers() } }.onSuccess { state = state.copy(loading = false, servers = it) }.onFailure { state = state.copy(loading = false, error = it.message) } } }
     fun connect(server: CloudServer) { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) {
         val ticket = VynodeCloudClient(state.accountToken).accessTicket(server.id)
         var lastError: Throwable? = null
-        for (endpoint in server.endpoints) {
+        val orderedEndpoints = server.endpoints.sortedBy { endpoint ->
+            val host = runCatching { java.net.URI(endpoint).host.orEmpty() }.getOrDefault("")
+            when { host.startsWith("10.") || host.startsWith("192.168.") -> 0; endpoint.startsWith("https://") -> 1; host.startsWith("100.") -> 2; host.startsWith("172.") -> 3; else -> 4 }
+        }
+        val failures = mutableListOf<String>()
+        for (endpoint in orderedEndpoints) {
             try {
                 val url = ServerConfigStore.normalize(endpoint)
                 val allowHttp = url.startsWith("http://") && runCatching { ServerConfigStore.isPrivateHost(java.net.URI(url).host) }.getOrDefault(false)
@@ -87,17 +99,18 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
                 val candidate = ServerConfig(url = url, allowLocalHttp = allowHttp, serverId = server.id, serverName = server.name)
                 val token = VynodeClient(candidate).claimCloud(ticket)
                 return@withContext candidate.copy(token = token)
-            } catch (error: Throwable) { lastError = error }
+            } catch (error: Throwable) { lastError = error; failures += "${runCatching { java.net.URI(endpoint).host }.getOrNull() ?: endpoint}: ${error.message}" }
         }
-        throw lastError ?: IllegalStateException("This server has no reachable address.")
+        throw IllegalStateException(if (failures.isEmpty()) "This server has no reachable address." else "Could not reach ${server.name}. Check that its server is running and Windows Private network access is allowed. Tried: ${failures.joinToString("; ")}", lastError)
     } }.onSuccess { config -> store.save(config); state = state.copy(config = config, loading = false); refresh() }.onFailure { state = state.copy(loading = false, error = it.message) } } }
-    fun refresh() { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeClient(state.config).let { it.library() to it.trailers() } } }.onSuccess { state = state.copy(loading = false, titles = it.first, trailers = it.second) }.onFailure { state = state.copy(loading = false, error = it.message) } } }
+    fun refresh() { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeClient(state.config).let { client -> Triple(client.library(), client.trailers(), client.watchlist()) } } }.onSuccess { state = state.copy(loading = false, titles = it.first, trailers = it.second, watchlist = it.third) }.onFailure { state = state.copy(loading = false, error = it.message) } } }
     fun select(item: MediaTitle?) { state = state.copy(selected = item, playing = null) }
     fun play(item: MediaTitle, episode: Episode? = null) { state = state.copy(selected = item, playing = episode ?: Episode(item.id, item.title, 0, 0, item.progress)) }
     fun stop() { state = state.copy(playing = null) }
     fun changeServer() { store.clearServer(); state = state.copy(config = ServerConfig(), titles = emptyList(), selected = null); loadServers() }
     fun logout() { store.clear(); state = TvState() }
     fun saveProgress(id: String, value: Float) { viewModelScope.launch(Dispatchers.IO) { runCatching { VynodeClient(state.config).progress(id, value) } } }
+    fun toggleWatchlist(id: String) { val enabled = id !in state.watchlist; state = state.copy(watchlist = if (enabled) state.watchlist + id else state.watchlist - id); viewModelScope.launch(Dispatchers.IO) { runCatching { VynodeClient(state.config).setWatchlisted(id, enabled) }.onFailure { withContext(Dispatchers.Main) { state = state.copy(watchlist = if (enabled) state.watchlist - id else state.watchlist + id, error = it.message) } } } }
 }
 
 @Composable private fun VynodeTheme(content: @Composable () -> Unit) {
@@ -107,27 +120,35 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
 @Composable fun VynodeTvApp(vm: TvViewModel = viewModel()) {
     val state = vm.state
     when {
-        state.accountToken.isBlank() -> SignInScreen(state, vm::login)
+        state.accountToken.isBlank() -> SignInScreen(state, vm::authenticate)
         state.config.url.isBlank() || state.config.token.isBlank() -> ServerScreen(state, vm::loadServers, vm::connect, vm::logout)
         state.playing != null && state.selected != null -> PlayerScreen(state.config, state.playing, vm::stop) { vm.saveProgress(state.playing.id, it) }
-        state.selected != null -> DetailScreen(state.selected, state.trailers[state.selected.id], vm::select, vm::play)
+        state.selected != null -> DetailScreen(state.selected, state.trailers[state.selected.id], state.selected.id in state.watchlist, vm::toggleWatchlist, vm::select, vm::play)
         else -> HomeScreen(state, vm::refresh, vm::select, vm::changeServer)
     }
 }
 
-@Composable private fun SignInScreen(state: TvState, login: (String, String) -> Unit) {
+@Composable private fun SignInScreen(state: TvState, authenticate: (Boolean, String, String, String) -> Unit) {
+    var register by rememberSaveable { mutableStateOf(false) }
+    var name by rememberSaveable { mutableStateOf("") }
     var email by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF292052), Ink))).padding(horizontal = 96.dp, vertical = 54.dp), contentAlignment = Alignment.Center) {
         Column(Modifier.width(760.dp).background(Panel.copy(alpha = .96f), RoundedCornerShape(24.dp)).border(1.dp, Color(0xFF343A4A), RoundedCornerShape(24.dp)).padding(44.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Brand()
-            Text("Sign in to Vynode", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+            Text(if (register) "Create your Vynode account" else "Sign in to Vynode", fontSize = 32.sp, fontWeight = FontWeight.Bold)
             Text("Your account securely finds every Vynode server you own.", color = Muted, fontSize = 18.sp, modifier = Modifier.padding(12.dp, 24.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { register = false }, colors = ButtonDefaults.colors(containerColor = if (!register) Purple else Color(0xFF252936)), modifier = Modifier.weight(1f)) { Text("SIGN IN") }
+                Button(onClick = { register = true }, colors = ButtonDefaults.colors(containerColor = if (register) Purple else Color(0xFF252936)), modifier = Modifier.weight(1f)) { Text("CREATE ACCOUNT") }
+            }
+            Spacer(Modifier.height(16.dp))
+            if (register) { TvTextField(name, { name = it }, "Name", Modifier.fillMaxWidth()); Spacer(Modifier.height(14.dp)) }
             TvTextField(email, { email = it }, "Email", Modifier.fillMaxWidth())
             Spacer(Modifier.height(14.dp))
             TvTextField(password, { password = it }, "Password", Modifier.fillMaxWidth(), password = true)
             state.error?.let { Text(it, color = Color(0xFFFF8C9B), modifier = Modifier.padding(14.dp)) }
-            Button(onClick = { login(email, password) }, enabled = !state.loading && email.isNotBlank() && password.isNotBlank(), modifier = Modifier.padding(top = 16.dp)) { Text(if (state.loading) "SIGNING IN…" else "SIGN IN", fontSize = 18.sp) }
+            Button(onClick = { authenticate(register, name, email, password) }, enabled = !state.loading && email.isNotBlank() && password.length >= 10 && (!register || name.isNotBlank()), modifier = Modifier.padding(top = 16.dp)) { Text(if (state.loading) "PLEASE WAIT…" else if (register) "CREATE ACCOUNT" else "SIGN IN", fontSize = 18.sp) }
         }
     }
 }
@@ -148,34 +169,43 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
 
 @Composable private fun HomeScreen(state: TvState, refresh: () -> Unit, select: (MediaTitle) -> Unit, disconnect: () -> Unit) {
     var filter by rememberSaveable { mutableStateOf("All") }
-    val visible = state.titles.filter { filter == "All" || (filter == "Movies" && it.kind == "Movie") || (filter == "TV" && it.kind == "Series") }
+    val movies = state.titles.filter { it.kind == "Movie" }
+    val shows = state.titles.filter { it.kind == "Series" }
+    val visible = when (filter) { "Movies" -> movies; "TV" -> shows; "Continue" -> state.titles.filter { it.progress > 0f && it.progress < .95f }; "Watchlist" -> state.titles.filter { it.id in state.watchlist }; else -> state.titles }
     Column(Modifier.fillMaxSize().background(Ink).padding(horizontal = 72.dp, vertical = 42.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Brand(); Spacer(Modifier.weight(1f))
-            listOf("All", "Movies", "TV").forEach { value -> Button(onClick = { filter = value }, colors = ButtonDefaults.colors(containerColor = if (filter == value) Purple else Panel), modifier = Modifier.padding(horizontal = 5.dp)) { Text(value) } }
+            listOf("All", "Movies", "TV", "Continue", "Watchlist").forEach { value -> Button(onClick = { filter = value }, colors = ButtonDefaults.colors(containerColor = if (filter == value) Purple else Panel), modifier = Modifier.padding(horizontal = 4.dp)) { Text(value) } }
             Button(onClick = refresh, modifier = Modifier.padding(start = 18.dp)) { Text("Refresh") }
             Button(onClick = disconnect, colors = ButtonDefaults.colors(containerColor = Color(0xFF351921)), modifier = Modifier.padding(start = 8.dp)) { Text("Disconnect") }
         }
         Text("YOUR MEDIA", color = Purple, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, modifier = Modifier.padding(top = 38.dp))
-        Text(if (filter == "All") "Combined Library" else filter, fontSize = 42.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(vertical = 8.dp))
+        Text(if (filter == "All") "Combined Library" else if (filter == "Continue") "Continue Watching" else filter, fontSize = 42.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(vertical = 8.dp))
         if (state.loading) Text("Loading libraries…", color = Muted, fontSize = 18.sp)
         state.error?.let { Text(it, color = Color(0xFFFF8C9B), fontSize = 18.sp) }
         if (!state.loading && visible.isEmpty()) Text("No titles are available in this view.", color = Muted, fontSize = 20.sp, modifier = Modifier.padding(top = 50.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(22.dp), contentPadding = PaddingValues(vertical = 26.dp, horizontal = 8.dp)) { items(visible, key = { it.id }) { item -> PosterCard(item) { select(item) } } }
+        if (filter == "All") LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            if (movies.isNotEmpty()) { item { Text("MOVIES", fontSize = 24.sp, fontWeight = FontWeight.Bold) }; item { MediaShelf(movies, select) } }
+            if (shows.isNotEmpty()) { item { Text("TV SHOWS", fontSize = 24.sp, fontWeight = FontWeight.Bold) }; item { MediaShelf(shows, select) } }
+        } else MediaShelf(visible, select)
     }
+}
+
+@Composable private fun MediaShelf(items: List<MediaTitle>, select: (MediaTitle) -> Unit) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(22.dp), contentPadding = PaddingValues(vertical = 18.dp, horizontal = 8.dp)) { items(items, key = { it.id }) { item -> PosterCard(item) { select(item) } } }
 }
 
 @Composable private fun PosterCard(item: MediaTitle, onClick: () -> Unit) {
     FocusSurface(onClick = onClick, modifier = Modifier.width(205.dp)) {
-        Column { Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(Brush.linearGradient(listOf(Color.hsv(item.hue.toFloat(), .62f, .55f), Color(0xFF10121A))), RoundedCornerShape(14.dp)).padding(16.dp), contentAlignment = Alignment.BottomStart) { Text(item.title.uppercase(), fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 22.sp) }; Text(item.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(top = 12.dp)); Text("${item.kind}  •  ${item.libraryName}", color = Muted, fontSize = 14.sp, maxLines = 1) }
+        Column { Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(14.dp)).background(Brush.linearGradient(listOf(Color.hsv(item.hue.toFloat(), .62f, .55f), Color(0xFF10121A)))), contentAlignment = Alignment.BottomStart) { if (item.artwork.isNotBlank()) AsyncImage(model = item.artwork, contentDescription = "${item.title} poster", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()); if (item.artwork.isBlank()) Text(item.title.uppercase(), fontSize = 21.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 22.sp, modifier = Modifier.padding(16.dp)); if (item.progress > 0f && item.progress < .95f) Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(item.progress).height(6.dp).background(Teal)) }; Text(item.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(top = 12.dp)); Text("${item.kind}  •  ${item.libraryName}", color = Muted, fontSize = 14.sp, maxLines = 1) }
     }
 }
 
-@Composable private fun DetailScreen(item: MediaTitle, trailer: String?, close: (MediaTitle?) -> Unit, play: (MediaTitle, Episode?) -> Unit) {
+@Composable private fun DetailScreen(item: MediaTitle, trailer: String?, watchlisted: Boolean, toggleWatchlist: (String) -> Unit, close: (MediaTitle?) -> Unit, play: (MediaTitle, Episode?) -> Unit) {
     val context = LocalContext.current
     androidx.activity.compose.BackHandler { close(null) }
     LazyColumn(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.hsv(item.hue.toFloat(), .55f, .28f), Ink), endY = 650f)).padding(horizontal = 80.dp, vertical = 52.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        item { Text("‹ BACK", color = Muted, fontSize = 18.sp, modifier = Modifier.focusable().onKeyEvent { if (it.type == KeyEventType.KeyUp && (it.key == Key.Enter || it.key == Key.DirectionCenter)) { close(null); true } else false }.clickable { close(null) }.padding(12.dp)); Text(item.kind.uppercase(), color = Purple, fontWeight = FontWeight.Bold, letterSpacing = 2.sp); Text(item.title, fontSize = 52.sp, fontWeight = FontWeight.ExtraBold); Text(listOf(item.year, item.libraryName).filter { it.isNotBlank() }.joinToString("  •  "), color = Muted, fontSize = 19.sp); Row { if (item.kind == "Movie") Button(onClick = { play(item, null) }, modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)) { Text("▶  PLAY", fontSize = 20.sp) }; if (!trailer.isNullOrBlank()) Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(trailer))) }, colors = ButtonDefaults.colors(containerColor = Panel), modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)) { Text("WATCH TRAILER", fontSize = 18.sp) } } }
+        item { Text("‹ BACK", color = Muted, fontSize = 18.sp, modifier = Modifier.focusable().onKeyEvent { if (it.type == KeyEventType.KeyUp && (it.key == Key.Enter || it.key == Key.DirectionCenter)) { close(null); true } else false }.clickable { close(null) }.padding(12.dp)); Text(item.kind.uppercase(), color = Purple, fontWeight = FontWeight.Bold, letterSpacing = 2.sp); Text(item.title, fontSize = 52.sp, fontWeight = FontWeight.ExtraBold); Text(listOf(item.year, item.rating, item.libraryName).filter { it.isNotBlank() }.joinToString("  •  "), color = Muted, fontSize = 19.sp); if (item.description.isNotBlank()) Text(item.description, color = Color(0xFFD5D8E2), fontSize = 18.sp, lineHeight = 26.sp, modifier = Modifier.widthIn(max = 960.dp)); Row { if (item.kind == "Movie") Button(onClick = { play(item, null) }, modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)) { Text("▶  ${if (item.progress > 0f && item.progress < .95f) "RESUME" else "PLAY"}", fontSize = 20.sp) }; Button(onClick = { toggleWatchlist(item.id) }, colors = ButtonDefaults.colors(containerColor = Panel), modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)) { Text(if (watchlisted) "★ WATCHLISTED" else "☆ ADD TO WATCHLIST", fontSize = 18.sp) }; if (!trailer.isNullOrBlank()) Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(trailer))) }, colors = ButtonDefaults.colors(containerColor = Panel), modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp)) { Text("WATCH TRAILER", fontSize = 18.sp) } } }
         if (item.seasons.isNotEmpty()) item.seasons.forEach { season ->
             item { Text(season.title, fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp)) }
             items(season.episodes, key = { it.id }) { episode -> FocusSurface(onClick = { play(item, episode) }, modifier = Modifier.fillMaxWidth()) { Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(64.dp).background(Purple, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) { Text("▶", fontSize = 22.sp) }; Spacer(Modifier.width(20.dp)); Column { Text("${episode.episode}. ${episode.title}", fontSize = 21.sp, fontWeight = FontWeight.Bold); Text("Season ${episode.season} • ${if (episode.progress > 0) "${(episode.progress * 100).toInt()}% watched" else "Unplayed"}", color = Muted, fontSize = 15.sp) } } } }
@@ -188,7 +218,11 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     val context = LocalContext.current
     val player = remember(config.url, episode.id) {
         val headers = if (config.token.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer ${config.token}")
-        ExoPlayer.Builder(context).setMediaSourceFactory(ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers))).build().apply { setMediaItem(MediaItem.fromUri(VynodeClient(config).streamUrl(episode.id))); prepare(); seekTo((episode.progress * duration.coerceAtLeast(0)).toLong()); playWhenReady = true }
+        ExoPlayer.Builder(context).setMediaSourceFactory(ProgressiveMediaSource.Factory(DefaultHttpDataSource.Factory().setDefaultRequestProperties(headers))).build().apply {
+            var resumed = false
+            addListener(object : Player.Listener { override fun onPlaybackStateChanged(playbackState: Int) { if (!resumed && playbackState == Player.STATE_READY) { val runtime = duration.takeIf { it > 0 } ?: episode.duration; if (runtime > 0 && episode.progress > 0) seekTo((episode.progress * runtime).toLong()); resumed = true } } })
+            setMediaItem(MediaItem.fromUri(VynodeClient(config).streamUrl(episode.id))); prepare(); playWhenReady = true
+        }
     }
     fun stop() { if (player.duration > 0) progress((player.currentPosition.toFloat() / player.duration).coerceIn(0f, 1f)); player.release(); close() }
     androidx.activity.compose.BackHandler { stop() }
