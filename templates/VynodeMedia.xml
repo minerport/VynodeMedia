@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>VynodeMedia</Name>
+  <Repository>ghcr.io/minerport/vynodemedia:latest</Repository>
+  <Registry>https://github.com/minerport/VynodeMedia/pkgs/container/vynodemedia</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/minerport/VynodeMedia/issues</Support>
+  <Project>https://github.com/minerport/VynodeMedia</Project>
+  <Overview>Vynode Media is a private multi-server movie and television library, player, transcoder, collection manager, and universal client. The Docker and Unraid editions use the same interface and media engine as the Windows application.</Overview>
+  <Category>MediaApp:Video MediaServer:Video</Category>
+  <WebUI>http://[IP]:[PORT:8787]</WebUI>
+  <ExtraParams>--security-opt=no-new-privileges:true --cap-drop=ALL</ExtraParams>
+  <Config Name="Web UI" Target="8787" Default="8787" Mode="tcp" Description="Vynode Media web interface and API" Type="Port" Display="always" Required="true" Mask="false">8787</Config>
+  <Config Name="Application Data" Target="/config" Default="/mnt/user/appdata/vynode-media" Mode="rw" Description="Accounts, settings, library definitions, progress, artwork, and media probe cache" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/vynode-media</Config>
+  <Config Name="Media" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Parent media directory. Add individual libraries and watched folders inside Vynode." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media</Config>
+  <Config Name="Timezone" Target="TZ" Default="America/New_York" Mode="" Description="Container timezone" Type="Variable" Display="advanced" Required="false" Mask="false">America/New_York</Config>
+</Container>

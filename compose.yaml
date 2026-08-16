@@ -1,0 +1,19 @@
+services:
+  vynode-media:
+    build: .
+    image: ghcr.io/minerport/vynodemedia:latest
+    container_name: vynode-media
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      TZ: America/New_York
+      PORT: "8787"
+      VYNODE_DATA_DIR: /config
+    volumes:
+      - ./config:/config
+      - /path/to/your/media:/media:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
