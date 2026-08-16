@@ -11,14 +11,17 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-data class ServerConfig(val url: String = "", val token: String = "", val allowLocalHttp: Boolean = false)
+data class ServerConfig(val url: String = "", val token: String = "", val allowLocalHttp: Boolean = false, val serverId: String = "", val serverName: String = "")
 
 class ServerConfigStore(context: Context) {
     private val prefs = context.getSharedPreferences("vynode_tv", Context.MODE_PRIVATE)
     private val alias = "vynode-tv-token"
 
-    fun load() = ServerConfig(prefs.getString("server_url", "") ?: "", decrypt(prefs.getString("token", "") ?: ""), prefs.getBoolean("allow_http", false))
-    fun save(config: ServerConfig) = prefs.edit().putString("server_url", normalize(config.url)).putString("token", encrypt(config.token)).putBoolean("allow_http", config.allowLocalHttp).apply()
+    fun load() = ServerConfig(prefs.getString("server_url", "") ?: "", decrypt(prefs.getString("token", "") ?: ""), prefs.getBoolean("allow_http", false), prefs.getString("server_id", "") ?: "", prefs.getString("server_name", "") ?: "")
+    fun save(config: ServerConfig) = prefs.edit().putString("server_url", normalize(config.url)).putString("token", encrypt(config.token)).putBoolean("allow_http", config.allowLocalHttp).putString("server_id", config.serverId).putString("server_name", config.serverName).apply()
+    fun accountToken() = decrypt(prefs.getString("account_token", "") ?: "")
+    fun saveAccountToken(token: String) = prefs.edit().putString("account_token", encrypt(token)).apply()
+    fun clearServer() = prefs.edit().remove("server_url").remove("token").remove("allow_http").remove("server_id").remove("server_name").apply()
     fun clear() = prefs.edit().clear().apply()
 
     private fun key(): SecretKey {

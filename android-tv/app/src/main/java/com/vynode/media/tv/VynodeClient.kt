@@ -14,6 +14,10 @@ class VynodeClient(private val config: ServerConfig) {
         val body = JSONObject().put("code", code.uppercase()).put("name", "NVIDIA Shield TV").toString()
         return JSONObject(request("/api/pair/claim", "POST", body)).getString("token")
     }
+    fun claimCloud(ticket: String): String {
+        val body = JSONObject().put("ticket", ticket).put("name", "NVIDIA Shield TV").toString()
+        return JSONObject(request("/api/cloud/claim", "POST", body)).getString("token")
+    }
     fun progress(id: String, value: Float) { request("/api/progress/$id", "POST", JSONObject().put("progress", value).toString()) }
     fun streamUrl(id: String, transcode: Boolean = false) = "${config.url}/${if (transcode) "transcode" else "stream"}/$id"
 

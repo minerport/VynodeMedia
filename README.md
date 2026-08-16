@@ -13,7 +13,7 @@ Vynode Media is a private, self-hosted media library, player, and universal clie
 - SRT and WebVTT subtitles
 - Watch progress, trailers, collections, custom posters, and title overlays
 - Grid, compact, and list layouts with saved appearance settings
-- Device pairing and revocable access tokens
+- Account-based server discovery, cloud access tickets, and revocable device tokens
 - Vynode Cloud discovery through `https://media.vynodehub.com`
 
 ## Windows

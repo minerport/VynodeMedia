@@ -1,0 +1,14 @@
+services:
+  vynode-cloud:
+    build: .
+    container_name: vynode-cloud
+    user: "99:100"
+    restart: unless-stopped
+    ports: ["8790:8790"]
+    environment:
+      PORT: "8790"
+      DATA_DIR: /data
+    volumes:
+      - /mnt/user/appdata/vynode-cloud/data:/data
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]

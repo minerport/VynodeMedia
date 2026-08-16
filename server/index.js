@@ -18,6 +18,8 @@ const customizationFile = path.join(dataDir, "customization.json");
 const probeCacheFile = path.join(dataDir, "probe-cache.json");
 const devicesFile = path.join(dataDir, "devices.json");
 const serverIdentityFile = path.join(dataDir, "server-identity.json");
+const cloudIdentityFile = path.join(dataDir, "cloud-identity.json");
+const cloudUrl = process.env.VYNODE_CLOUD_URL || "https://media.vynodehub.com";
 const videoExt = new Set([".mp4", ".mkv", ".webm", ".m4v", ".mov", ".avi"]);
 const readState = () => {
   try {
@@ -151,6 +153,13 @@ const serverIdentity = () => {
     return identity;
   }
 };
+const readCloudIdentity = () => {
+  try {
+    return JSON.parse(fs.readFileSync(cloudIdentityFile, "utf8"));
+  } catch {
+    return null;
+  }
+};
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 const isLocalRequest = (req) =>
@@ -182,6 +191,8 @@ app.use("/api", (req, res, next) => {
     isLocalRequest(req) ||
     req.path === "/health" ||
     req.path === "/pair/claim" ||
+    req.path === "/cloud/claim" ||
+    req.path === "/cloud/config" ||
     req.path === "/remote/status"
   )
     return next();
@@ -371,6 +382,58 @@ app.post("/api/pair/claim", (req, res) => {
     maxAge: 365 * 24 * 60 * 60 * 1000,
   });
   res.json({ token, server: serverIdentity() });
+});
+app.post("/api/cloud/config", async (req, res) => {
+  const serverId = String(req.body.serverId || "");
+  if (!/^[0-9a-f-]{20,}$/i.test(serverId))
+    return res.status(400).json({ error: "Invalid cloud server identity." });
+  try {
+    const response = await fetch(`${cloudUrl}/v1/access/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticket: String(req.body.ticket || ""), serverId }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.authorized)
+      return res.status(401).json({ error: result.error || "Cloud ownership verification failed." });
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(cloudIdentityFile, JSON.stringify({ serverId, ownerId: result.account?.id, configuredAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    res.json({ ok: true, serverId });
+  } catch {
+    res.status(502).json({ error: "Vynode Cloud could not be reached." });
+  }
+});
+app.post("/api/cloud/claim", async (req, res) => {
+  const cloud = readCloudIdentity();
+  if (!cloud?.serverId)
+    return res.status(409).json({ error: "This server is not linked to Vynode Cloud." });
+  try {
+    const response = await fetch(`${cloudUrl}/v1/access/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticket: String(req.body.ticket || ""), serverId: cloud.serverId }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.authorized)
+      return res.status(401).json({ error: result.error || "Cloud authorization failed." });
+    const token = crypto.randomBytes(32).toString("base64url");
+    const device = {
+      id: crypto.randomUUID(),
+      name: String(req.body.name || "Vynode TV").slice(0, 80),
+      accountId: result.account?.id,
+      tokenHash: hashToken(token),
+      createdAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    };
+    const devices = readDevices();
+    devices.push(device);
+    writeDevices(devices);
+    res.json({ token, server: serverIdentity() });
+  } catch {
+    res.status(502).json({ error: "Vynode Cloud could not be reached." });
+  }
 });
 app.get("/api/devices", (_, res) =>
   res.json({
