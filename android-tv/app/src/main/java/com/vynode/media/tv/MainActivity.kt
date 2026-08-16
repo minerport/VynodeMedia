@@ -36,6 +36,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
@@ -66,25 +68,35 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-data class TvState(val config: ServerConfig = ServerConfig(), val loading: Boolean = false, val titles: List<MediaTitle> = emptyList(), val trailers: Map<String, String> = emptyMap(), val error: String? = null, val selected: MediaTitle? = null, val playing: Episode? = null)
+data class TvState(val config: ServerConfig = ServerConfig(), val accountToken: String = "", val servers: List<CloudServer> = emptyList(), val loading: Boolean = false, val titles: List<MediaTitle> = emptyList(), val trailers: Map<String, String> = emptyMap(), val error: String? = null, val selected: MediaTitle? = null, val playing: Episode? = null)
 
 class TvViewModel(application: Application) : AndroidViewModel(application) {
     private val store = ServerConfigStore(application)
-    var state by mutableStateOf(TvState(config = store.load())); private set
-    init { if (state.config.url.isNotBlank() && state.config.token.isNotBlank()) refresh() }
-    fun configure(url: String, allowHttp: Boolean, code: String) {
-        val normalized = ServerConfigStore.normalize(url)
-        ServerConfigStore.validate(normalized, allowHttp)?.let { state = state.copy(error = it); return }
-        state = state.copy(loading = true, error = null)
-        viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeClient(ServerConfig(normalized, allowLocalHttp = allowHttp)).claim(code) } }.onSuccess { token ->
-            val config = ServerConfig(normalized, token, allowHttp); store.save(config); state = state.copy(config = config, loading = false); refresh()
-        }.onFailure { state = state.copy(loading = false, error = it.message) } }
-    }
+    var state by mutableStateOf(TvState(config = store.load(), accountToken = store.accountToken())); private set
+    init { when { state.accountToken.isBlank() -> Unit; state.config.url.isNotBlank() && state.config.token.isNotBlank() -> refresh(); else -> loadServers() } }
+    fun login(email: String, password: String) { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeCloudClient().login(email, password) } }.onSuccess { token -> store.saveAccountToken(token); state = state.copy(accountToken = token, loading = false); loadServers() }.onFailure { state = state.copy(loading = false, error = it.message) } } }
+    fun loadServers() { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeCloudClient(state.accountToken).servers() } }.onSuccess { state = state.copy(loading = false, servers = it) }.onFailure { state = state.copy(loading = false, error = it.message) } } }
+    fun connect(server: CloudServer) { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) {
+        val ticket = VynodeCloudClient(state.accountToken).accessTicket(server.id)
+        var lastError: Throwable? = null
+        for (endpoint in server.endpoints) {
+            try {
+                val url = ServerConfigStore.normalize(endpoint)
+                val allowHttp = url.startsWith("http://") && runCatching { ServerConfigStore.isPrivateHost(java.net.URI(url).host) }.getOrDefault(false)
+                ServerConfigStore.validate(url, allowHttp)?.let { continue }
+                val candidate = ServerConfig(url = url, allowLocalHttp = allowHttp, serverId = server.id, serverName = server.name)
+                val token = VynodeClient(candidate).claimCloud(ticket)
+                return@withContext candidate.copy(token = token)
+            } catch (error: Throwable) { lastError = error }
+        }
+        throw lastError ?: IllegalStateException("This server has no reachable address.")
+    } }.onSuccess { config -> store.save(config); state = state.copy(config = config, loading = false); refresh() }.onFailure { state = state.copy(loading = false, error = it.message) } } }
     fun refresh() { state = state.copy(loading = true, error = null); viewModelScope.launch { runCatching { withContext(Dispatchers.IO) { VynodeClient(state.config).let { it.library() to it.trailers() } } }.onSuccess { state = state.copy(loading = false, titles = it.first, trailers = it.second) }.onFailure { state = state.copy(loading = false, error = it.message) } } }
     fun select(item: MediaTitle?) { state = state.copy(selected = item, playing = null) }
     fun play(item: MediaTitle, episode: Episode? = null) { state = state.copy(selected = item, playing = episode ?: Episode(item.id, item.title, 0, 0, item.progress)) }
     fun stop() { state = state.copy(playing = null) }
-    fun disconnect() { store.clear(); state = TvState() }
+    fun changeServer() { store.clearServer(); state = state.copy(config = ServerConfig(), titles = emptyList(), selected = null); loadServers() }
+    fun logout() { store.clear(); state = TvState() }
     fun saveProgress(id: String, value: Float) { viewModelScope.launch(Dispatchers.IO) { runCatching { VynodeClient(state.config).progress(id, value) } } }
 }
 
@@ -95,31 +107,41 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
 @Composable fun VynodeTvApp(vm: TvViewModel = viewModel()) {
     val state = vm.state
     when {
-        state.config.url.isBlank() || state.config.token.isBlank() -> ConnectScreen(state, vm::configure)
+        state.accountToken.isBlank() -> SignInScreen(state, vm::login)
+        state.config.url.isBlank() || state.config.token.isBlank() -> ServerScreen(state, vm::loadServers, vm::connect, vm::logout)
         state.playing != null && state.selected != null -> PlayerScreen(state.config, state.playing, vm::stop) { vm.saveProgress(state.playing.id, it) }
         state.selected != null -> DetailScreen(state.selected, state.trailers[state.selected.id], vm::select, vm::play)
-        else -> HomeScreen(state, vm::refresh, vm::select, vm::disconnect)
+        else -> HomeScreen(state, vm::refresh, vm::select, vm::changeServer)
     }
 }
 
-@Composable private fun ConnectScreen(state: TvState, connect: (String, Boolean, String) -> Unit) {
-    var url by rememberSaveable { mutableStateOf("https://") }
-    var code by rememberSaveable { mutableStateOf("") }
-    var localHttp by rememberSaveable { mutableStateOf(false) }
+@Composable private fun SignInScreen(state: TvState, login: (String, String) -> Unit) {
+    var email by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
     Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF292052), Ink))).padding(horizontal = 96.dp, vertical = 54.dp), contentAlignment = Alignment.Center) {
         Column(Modifier.width(760.dp).background(Panel.copy(alpha = .96f), RoundedCornerShape(24.dp)).border(1.dp, Color(0xFF343A4A), RoundedCornerShape(24.dp)).padding(44.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Brand()
-            Text("Connect your Vynode server", fontSize = 32.sp, fontWeight = FontWeight.Bold)
-            Text("Start pairing in Vynode on Windows, Docker, or Unraid, then enter the server address and code.", color = Muted, fontSize = 18.sp, modifier = Modifier.padding(12.dp, 24.dp))
-            TvTextField(url, { url = it }, "Server URL", Modifier.fillMaxWidth())
+            Text("Sign in to Vynode", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+            Text("Your account securely finds every Vynode server you own.", color = Muted, fontSize = 18.sp, modifier = Modifier.padding(12.dp, 24.dp))
+            TvTextField(email, { email = it }, "Email", Modifier.fillMaxWidth())
             Spacer(Modifier.height(14.dp))
-            TvTextField(code, { code = it.uppercase().take(20) }, "Pairing code", Modifier.fillMaxWidth(), true)
-            Spacer(Modifier.height(14.dp))
-            FocusSurface(onClick = { localHttp = !localHttp }, modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) { Text(if (localHttp) "✓" else "○", color = if (localHttp) Teal else Muted, fontSize = 24.sp); Spacer(Modifier.width(14.dp)); Column { Text("Trust local-network HTTP server", fontSize = 18.sp); Text("Only permits private 10.x, 172.16–31.x, 192.168.x, localhost, or .local addresses.", color = Muted, fontSize = 14.sp) } }
-            }
+            TvTextField(password, { password = it }, "Password", Modifier.fillMaxWidth(), password = true)
             state.error?.let { Text(it, color = Color(0xFFFF8C9B), modifier = Modifier.padding(14.dp)) }
-            Button(onClick = { connect(url, localHttp, code) }, enabled = !state.loading && code.isNotBlank(), modifier = Modifier.padding(top = 16.dp)) { Text(if (state.loading) "CONNECTING…" else "PAIR & CONNECT", fontSize = 18.sp) }
+            Button(onClick = { login(email, password) }, enabled = !state.loading && email.isNotBlank() && password.isNotBlank(), modifier = Modifier.padding(top = 16.dp)) { Text(if (state.loading) "SIGNING IN…" else "SIGN IN", fontSize = 18.sp) }
+        }
+    }
+}
+
+@Composable private fun ServerScreen(state: TvState, refresh: () -> Unit, connect: (CloudServer) -> Unit, logout: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(Ink).padding(horizontal = 80.dp, vertical = 52.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Brand(); Spacer(Modifier.weight(1f)); Button(onClick = refresh) { Text("Refresh") }; Button(onClick = logout, colors = ButtonDefaults.colors(containerColor = Color(0xFF351921)), modifier = Modifier.padding(start = 10.dp)) { Text("Sign out") } }
+        Text("YOUR VYNODE ACCOUNT", color = Purple, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, modifier = Modifier.padding(top = 44.dp))
+        Text("Choose a server", fontSize = 42.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(vertical = 10.dp))
+        Text("Online servers can be opened immediately. No address or pairing code is required.", color = Muted, fontSize = 18.sp)
+        state.error?.let { Text(it, color = Color(0xFFFF8C9B), fontSize = 18.sp, modifier = Modifier.padding(top = 14.dp)) }
+        if (state.loading) Text("Loading your servers…", color = Muted, fontSize = 20.sp, modifier = Modifier.padding(top = 40.dp))
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp), contentPadding = PaddingValues(vertical = 30.dp)) {
+            items(state.servers, key = { it.id }) { server -> FocusSurface(onClick = { if (server.online && !state.loading) connect(server) }, modifier = Modifier.fillMaxWidth()) { Row(Modifier.background(Panel, RoundedCornerShape(14.dp)).padding(24.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(64.dp).background(Brush.linearGradient(listOf(Purple, Teal)), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) { Text("V", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold) }; Spacer(Modifier.width(22.dp)); Column(Modifier.weight(1f)) { Text(server.name, fontSize = 24.sp, fontWeight = FontWeight.Bold); Text("${server.endpoints.size} available address${if (server.endpoints.size == 1) "" else "es"}", color = Muted, fontSize = 15.sp) }; Text(if (server.online) "ONLINE  ›" else "OFFLINE", color = if (server.online) Teal else Color(0xFFFF8C9B), fontWeight = FontWeight.Bold) } } }
         }
     }
 }
@@ -186,7 +208,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     Box(modifier.scale(scale).clip(RoundedCornerShape(14.dp)).border(BorderStroke(if (focused) 3.dp else 1.dp, border), RoundedCornerShape(14.dp)).onFocusChanged { focused = it.isFocused }.onKeyEvent { if (it.type == KeyEventType.KeyUp && (it.key == Key.Enter || it.key == Key.DirectionCenter || it.key == Key.ButtonA)) { onClick(); true } else false }.clickable(onClick = onClick).focusable().padding(3.dp)) { content() }
 }
 
-@Composable private fun TvTextField(value: String, onValueChange: (String) -> Unit, label: String, modifier: Modifier = Modifier, caps: Boolean = false) {
+@Composable private fun TvTextField(value: String, onValueChange: (String) -> Unit, label: String, modifier: Modifier = Modifier, caps: Boolean = false, password: Boolean = false) {
     var focused by remember { mutableStateOf(false) }
-    Column(modifier.background(Color(0xFF0A0C12), RoundedCornerShape(10.dp)).border(if (focused) 3.dp else 1.dp, if (focused) Teal else Color(0xFF3A4050), RoundedCornerShape(10.dp)).padding(14.dp)) { Text(label, color = if (focused) Teal else Muted, fontSize = 13.sp); BasicTextField(value, onValueChange, textStyle = TextStyle(color = Color.White, fontSize = 21.sp, letterSpacing = if (caps) 2.sp else 0.sp), cursorBrush = SolidColor(Teal), singleLine = true, keyboardOptions = KeyboardOptions(capitalization = if (caps) KeyboardCapitalization.Characters else KeyboardCapitalization.None), modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused }.padding(top = 5.dp)) }
+    Column(modifier.background(Color(0xFF0A0C12), RoundedCornerShape(10.dp)).border(if (focused) 3.dp else 1.dp, if (focused) Teal else Color(0xFF3A4050), RoundedCornerShape(10.dp)).padding(14.dp)) { Text(label, color = if (focused) Teal else Muted, fontSize = 13.sp); BasicTextField(value, onValueChange, textStyle = TextStyle(color = Color.White, fontSize = 21.sp, letterSpacing = if (caps) 2.sp else 0.sp), cursorBrush = SolidColor(Teal), singleLine = true, visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None, keyboardOptions = KeyboardOptions(capitalization = if (caps) KeyboardCapitalization.Characters else KeyboardCapitalization.None), modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused }.padding(top = 5.dp)) }
 }

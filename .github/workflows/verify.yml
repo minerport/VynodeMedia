@@ -19,6 +19,23 @@ jobs:
       - run: npm run build
       - run: node --check server/index.js
       - run: docker build -t vynodemedia:test .
+      - run: npm test
+        working-directory: cloud
+  android-tv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-tv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - run: chmod +x gradlew
+      - run: ./gradlew test lintDebug assembleDebug --no-daemon
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: verify

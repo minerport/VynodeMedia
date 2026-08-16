@@ -9,8 +9,8 @@ Vynode Media TV is a native Kotlin and Jetpack Compose for TV client for NVIDIA 
 - Shield remote, D-pad, Enter/Select, Back, media keys, and common gamepad A/B controls
 - Animated teal focus borders on every actionable card and control
 - 48–96 dp safe margins, large text, landscape layout, and TV launcher banner
-- HTTPS by default; private-network HTTP requires explicit confirmation
-- Pairing tokens encrypted with an Android Keystore-backed AES-GCM key
+- HTTPS by default; account-owned private-network endpoints are trusted automatically
+- Account sign-in, owned-server discovery, and Android Keystore-encrypted sessions
 
 Server administration, library folder selection, poster uploads, overlay editing, and device revocation remain in the Windows/web interface. YouTube trailers open through an installed YouTube or browser app rather than running embedded web content.
 
@@ -56,9 +56,9 @@ Push a version tag such as `v0.5.1-beta.1`. GitHub Actions tests the app, signs 
 1. On Shield, enable installation from unknown sources for Downloader under **Settings > Apps > Special app access > Install unknown apps**.
 2. Open Downloader and enter the direct HTTPS URL of the APK asset on the Vynode Media GitHub Release.
 3. Download, choose **Install**, then launch Vynode Media from the Apps row.
-4. In the server UI, start device pairing. Enter its HTTPS URL and pairing code on Shield.
+4. Sign in with the same Vynode account used by the server and select an online server.
 
-For a local `http://10.x.x.x:8787` or similar server, select **Trust local-network HTTP server**. Public HTTP servers are always rejected.
+Before the first TV sign-in, open **Vynode Cloud** in the Windows/web application, sign in, and choose **Add this server to my account**. This one-time action publishes the server and securely binds its cloud identity. The TV never asks for its address or a pairing code. Account-owned private-network HTTP endpoints are accepted automatically; public endpoints must use HTTPS.
 
 ## Install with ADB
 
@@ -66,7 +66,7 @@ Enable **Developer options > Network debugging** on Shield, note its IP, and run
 
 ```sh
 adb connect SHIELD_IP:5555
-adb install Vynode-Media-android-tv-0.5.0-beta.3.apk
+adb install Vynode-Media-android-tv-0.5.0-beta.4.apk
 ```
 
 Approve the debugging prompt on the television. Disable network debugging afterward when it is no longer needed.

@@ -1363,6 +1363,15 @@ function VynodeAccount() {
           capabilities: { movies: true, tv: true, transcoding: true },
         }),
       });
+      const access = await cloudFetch(`/v1/servers/${localServer.id}/access`, {
+        method: "POST",
+      }).then((response) => response.json());
+      if (!access.ticket) throw new Error(access.error || "Cloud authorization failed.");
+      await nativeFetch("/api/cloud/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ serverId: localServer.id, ticket: access.ticket }),
+      });
       const next = { ...account, localServer };
       localStorage.setItem("vynodeCloud", JSON.stringify(next));
       setAccount(next);

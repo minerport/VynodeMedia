@@ -17,8 +17,8 @@ android {
         applicationId = "com.vynode.media.tv"
         minSdk = 26
         targetSdk = 36
-        versionCode = 50003
-        versionName = "0.5.0-beta.3"
+        versionCode = 50004
+        versionName = "0.5.0-beta.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
