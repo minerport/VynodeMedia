@@ -24,6 +24,7 @@ class VynodeCloudClient(private val accountToken: String = "") {
         }
     }
     fun accessTicket(serverId: String): String = JSONObject(request("/v1/servers/$serverId/access", "POST", "{}")).getString("ticket")
+    fun logout() { request("/v1/session", "DELETE") }
 
     private fun request(path: String, method: String = "GET", body: String? = null): String {
         val connection = URL("https://media.vynodehub.com$path").openConnection() as HttpURLConnection

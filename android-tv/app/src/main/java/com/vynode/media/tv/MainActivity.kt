@@ -108,7 +108,7 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     fun play(item: MediaTitle, episode: Episode? = null) { state = state.copy(selected = item, playing = episode ?: Episode(item.id, item.title, 0, 0, item.progress)) }
     fun stop() { state = state.copy(playing = null) }
     fun changeServer() { store.clearServer(); state = state.copy(config = ServerConfig(), titles = emptyList(), selected = null); loadServers() }
-    fun logout() { store.clear(); state = TvState() }
+    fun logout() { val token = state.accountToken; store.clear(); state = TvState(); viewModelScope.launch(Dispatchers.IO) { runCatching { VynodeCloudClient(token).logout() } } }
     fun saveProgress(id: String, value: Float) { viewModelScope.launch(Dispatchers.IO) { runCatching { VynodeClient(state.config).progress(id, value) } } }
     fun toggleWatchlist(id: String) { val enabled = id !in state.watchlist; state = state.copy(watchlist = if (enabled) state.watchlist + id else state.watchlist - id); viewModelScope.launch(Dispatchers.IO) { runCatching { VynodeClient(state.config).setWatchlisted(id, enabled) }.onFailure { withContext(Dispatchers.Main) { state = state.copy(watchlist = if (enabled) state.watchlist - id else state.watchlist + id, error = it.message) } } } }
 }
@@ -133,22 +133,22 @@ class TvViewModel(application: Application) : AndroidViewModel(application) {
     var name by rememberSaveable { mutableStateOf("") }
     var email by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
-    Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF292052), Ink))).padding(horizontal = 96.dp, vertical = 54.dp), contentAlignment = Alignment.Center) {
-        Column(Modifier.width(760.dp).background(Panel.copy(alpha = .96f), RoundedCornerShape(24.dp)).border(1.dp, Color(0xFF343A4A), RoundedCornerShape(24.dp)).padding(44.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF292052), Ink))).padding(horizontal = 72.dp, vertical = 24.dp), contentAlignment = Alignment.Center) {
+        Column(Modifier.width(760.dp).background(Panel.copy(alpha = .96f), RoundedCornerShape(24.dp)).border(1.dp, Color(0xFF343A4A), RoundedCornerShape(24.dp)).padding(horizontal = 38.dp, vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Brand()
             Text(if (register) "Create your Vynode account" else "Sign in to Vynode", fontSize = 32.sp, fontWeight = FontWeight.Bold)
-            Text("Your account securely finds every Vynode server you own.", color = Muted, fontSize = 18.sp, modifier = Modifier.padding(12.dp, 24.dp))
+            Text("Your account securely finds every Vynode server you own.", color = Muted, fontSize = 18.sp, modifier = Modifier.padding(vertical = 12.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(onClick = { register = false }, colors = ButtonDefaults.colors(containerColor = if (!register) Purple else Color(0xFF252936)), modifier = Modifier.weight(1f)) { Text("SIGN IN") }
                 Button(onClick = { register = true }, colors = ButtonDefaults.colors(containerColor = if (register) Purple else Color(0xFF252936)), modifier = Modifier.weight(1f)) { Text("CREATE ACCOUNT") }
             }
-            Spacer(Modifier.height(16.dp))
-            if (register) { TvTextField(name, { name = it }, "Name", Modifier.fillMaxWidth()); Spacer(Modifier.height(14.dp)) }
+            Spacer(Modifier.height(10.dp))
+            if (register) { TvTextField(name, { name = it }, "Name", Modifier.fillMaxWidth()); Spacer(Modifier.height(10.dp)) }
             TvTextField(email, { email = it }, "Email", Modifier.fillMaxWidth())
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
             TvTextField(password, { password = it }, "Password", Modifier.fillMaxWidth(), password = true)
-            state.error?.let { Text(it, color = Color(0xFFFF8C9B), modifier = Modifier.padding(14.dp)) }
-            Button(onClick = { authenticate(register, name, email, password) }, enabled = !state.loading && email.isNotBlank() && password.length >= 10 && (!register || name.isNotBlank()), modifier = Modifier.padding(top = 16.dp)) { Text(if (state.loading) "PLEASE WAIT…" else if (register) "CREATE ACCOUNT" else "SIGN IN", fontSize = 18.sp) }
+            state.error?.let { Text(it, color = Color(0xFFFF8C9B), modifier = Modifier.padding(top = 8.dp), maxLines = 2) }
+            Button(onClick = { authenticate(register, name, email, password) }, enabled = !state.loading && email.isNotBlank() && password.isNotBlank() && (!register || (name.isNotBlank() && password.length >= 10)), modifier = Modifier.padding(top = 12.dp).fillMaxWidth()) { Text(if (state.loading) "PLEASE WAIT…" else if (register) "CREATE ACCOUNT" else "SIGN IN", fontSize = 18.sp) }
         }
     }
 }

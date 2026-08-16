@@ -1481,6 +1481,9 @@ function AccountGate() {
 
   useEffect(() => {
     if (!account?.token) return setChecking(false);
+    // A saved account is a durable local sign-in. Cloud availability must not
+    // sign the user out; only the explicit Sign out action may remove it.
+    setChecking(false);
     nativeFetch(`${CLOUD_URL}/v1/servers`, {
       headers: { Authorization: `Bearer ${account.token}` },
       signal: AbortSignal.timeout(10000),
@@ -1493,10 +1496,8 @@ function AccountGate() {
       localStorage.setItem("vynodeCloud", JSON.stringify(next));
       setAccount(next);
     }).catch((reason) => {
-      localStorage.removeItem("vynodeCloud");
-      setAccount(null);
-      setError(reason.name === "TimeoutError" ? "Vynode Cloud did not respond. Sign in again when your connection is available." : reason.message);
-    }).finally(() => setChecking(false));
+      setError(reason.name === "TimeoutError" ? "Vynode Cloud is temporarily unavailable. Your saved sign-in is still active." : `${reason.message} Your saved sign-in has been preserved.`);
+    });
   }, []);
 
   const authenticate = async (event) => {
@@ -1647,6 +1648,7 @@ function VynodeAccount() {
     }
   };
   const logout = () => {
+    if (account?.token) nativeFetch(`${CLOUD_URL}/v1/session`, { method: "DELETE", headers: { Authorization: `Bearer ${account.token}` } }).catch(() => {});
     localStorage.removeItem("vynodeCloud");
     setAccount(null);
     setServers([]);

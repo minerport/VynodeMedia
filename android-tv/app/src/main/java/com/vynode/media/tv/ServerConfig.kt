@@ -20,7 +20,7 @@ class ServerConfigStore(context: Context) {
     fun load() = ServerConfig(prefs.getString("server_url", "") ?: "", decrypt(prefs.getString("token", "") ?: ""), prefs.getBoolean("allow_http", false), prefs.getString("server_id", "") ?: "", prefs.getString("server_name", "") ?: "")
     fun save(config: ServerConfig) = prefs.edit().putString("server_url", normalize(config.url)).putString("token", encrypt(config.token)).putBoolean("allow_http", config.allowLocalHttp).putString("server_id", config.serverId).putString("server_name", config.serverName).apply()
     fun accountToken() = decrypt(prefs.getString("account_token", "") ?: "")
-    fun saveAccountToken(token: String) = prefs.edit().putString("account_token", encrypt(token)).apply()
+    fun saveAccountToken(token: String) { prefs.edit().putString("account_token", encrypt(token)).commit() }
     fun clearServer() = prefs.edit().remove("server_url").remove("token").remove("allow_http").remove("server_id").remove("server_name").apply()
     fun clear() = prefs.edit().clear().apply()
 
