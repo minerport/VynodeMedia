@@ -19,7 +19,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run package:win
+      - run: npm run package:win -- --publish never
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: true
