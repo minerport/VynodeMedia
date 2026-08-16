@@ -50,3 +50,7 @@ npm run dev
 ```
 
 Create a production web build with `npm run build`, a Windows package with `npm run package:win`, or a container with `docker build -t vynodemedia .`.
+
+## NVIDIA Shield / Android TV
+
+The native Kotlin and Jetpack Compose for TV client lives in [`android-tv`](android-tv). It provides remote-first combined library browsing, movie/series/season/episode details, secure device pairing, and Media3 playback while preserving the Vynode desktop visual identity. See [`android-tv/README.md`](android-tv/README.md) for Android Studio, command-line, signing, release, Downloader, ADB, and upgrade instructions.

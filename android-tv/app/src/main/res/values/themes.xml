@@ -1,0 +1,1 @@
+<resources><style name="Theme.VynodeTV" parent="android:style/Theme.Material.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:windowFullscreen">true</item><item name="android:colorAccent">#7C5CFF</item><item name="android:windowBackground">#080A0F</item></style></resources>
