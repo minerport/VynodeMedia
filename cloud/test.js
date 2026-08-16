@@ -31,4 +31,11 @@ test("account ownership produces one single-use server access ticket", async (co
   assert.equal(verified.body.authorized, true);
   const replay = await call("/v1/access/verify", { method: "POST", body: JSON.stringify({ ticket: access.body.ticket, serverId }) });
   assert.equal(replay.response.status, 401);
+  const login = await call("/v1/accounts/login", { method: "POST", body: JSON.stringify({ email: "owner@example.com", password: "correct-horse-battery" }) });
+  assert.equal(login.response.status, 200);
+  assert.notEqual(login.body.token, registered.body.token);
+  assert.equal((await call("/v1/servers", { headers: { Authorization: `Bearer ${login.body.token}` } })).response.status, 200);
+  assert.equal((await call("/v1/session", { method: "DELETE", headers: { Authorization: `Bearer ${login.body.token}` } })).response.status, 200);
+  assert.equal((await call("/v1/servers", { headers: { Authorization: `Bearer ${login.body.token}` } })).response.status, 401);
+  assert.equal((await call("/v1/servers", { headers: accountHeaders })).response.status, 200);
 });
